@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+*.db
+*.db-*
+.DS_Store
+.claude/
+coverage.xml
+.coverage*
+node_modules/
+dist/
+build/

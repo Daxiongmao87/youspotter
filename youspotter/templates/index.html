@@ -1,0 +1,334 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>YouSpotter</title>
+    <style>
+      body { font-family: sans-serif; margin: 2rem; }
+      .row { margin: 0.5rem 0; }
+      input[type=text], select { width: 300px; }
+      pre { background: #f5f5f5; padding: 1rem; }
+    </style>
+  </head>
+  <body>
+    <h1 style="display:flex;align-items:center;justify-content:space-between;">
+      <span>YouSpotter</span>
+      <button id="open_sidebar" title="Open Settings">⚙️ Settings</button>
+    </h1>
+    <div id="gated">
+      <div id="tabs" class="row" style="display:flex;gap:8px;border-bottom:1px solid #ddd;margin-bottom:8px;">
+        <button id="tab_btn_status" class="tab active" style="border:none;background:transparent;padding:8px;border-bottom:2px solid #111;cursor:pointer;">Music Status</button>
+        <button id="tab_btn_queue" class="tab" style="border:none;background:transparent;padding:8px;cursor:pointer;">Download Queue</button>
+      </div>
+
+      <div id="tab_status" style="display:block;">
+        <h2>Status</h2>
+        <div id="tracking">
+          <div class="row">Missing: <span id="missing">0</span> | Downloading: <span id="downloading">0</span> | Downloaded: <span id="downloaded">0</span></div>
+          <div class="row">Songs: <span id="songs">0</span> | Artists: <span id="artists">0</span> | Albums: <span id="albums">0</span></div>
+          <div class="row"><button id="sync">Sync Now</button></div>
+          <div class="row"><strong>Recent Activity</strong></div>
+          <pre id="recent"></pre>
+        </div>
+      </div>
+
+      <div id="tab_queue" style="display:none;">
+        <h2>Download Queue</h2>
+        <table style="width:100%;border-collapse:collapse;">
+          <thead><tr><th style="text-align:left;border-bottom:1px solid #ddd;">Song</th><th style="text-align:left;border-bottom:1px solid #ddd;">Status</th></tr></thead>
+          <tbody id="q_table"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="sidebar_backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.35);"></div>
+    <aside id="sidebar" style="display:none;position:fixed;top:0;right:0;width:380px;height:100vh;background:#fff;color:#111;border-left:1px solid #ddd;box-shadow:-4px 0 10px rgba(0,0,0,0.1);padding:16px;overflow:auto;z-index:1000;">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <h2 style="margin:0;">Settings</h2>
+        <button id="close_sidebar" title="Close" style="border:none;background:transparent;font-size:20px;cursor:pointer">✕</button>
+      </div>
+      <div class="row" style="margin-top:10px;color:#333;font-size:0.95em;">
+        <strong>Spotify Setup (one-time)</strong>
+      </div>
+      <div class="row" id="spotify_help" style="background:#fffbdd;border:1px solid #f2e09b;padding:10px;border-radius:6px;position:relative;display:none;">
+        <button id="spotify_help_close" title="Hide" style="position:absolute;right:8px;top:8px;border:none;background:transparent;font-size:16px;cursor:pointer">✕</button>
+        <ol style="margin:0 0 0 18px;">
+          <li>Open <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a> → Create an app → When asked "Which API/SDKs are you planning to use?" select <strong>Web API</strong> only (do not select Ads API, Web Playback SDK, iOS, or Android).</li>
+          <li>Copy the <em>Client ID</em> and paste it below.</li>
+          <li>In your Spotify app settings, add this Redirect URI exactly: <code id="redirect_uri"></code> then save.</li>
+          <li>Back here, click <em>Save</em>, then click <em>Authenticate with Spotify</em>.</li>
+        </ol>
+        <div style="margin-top:6px;color:#555;">No client secret is needed. PKCE is used and tokens are stored locally for the daemon. Required scopes are requested automatically during authentication (playlist-read-private, playlist-read-collaborative).</div>
+      </div>
+      <div class="row" style="margin-top:6px;">Spotify Client ID (required)<br/>
+        <input id="spotify_client_id" type="text" style="width:100%;" />
+        <div id="err_client_id" style="color:#b00020;display:none;">Client ID is required.</div>
+      </div>
+      <div class="row">Download Path (folder only)<br/>
+        <input id="host_path" type="text" style="width:100%;" placeholder="/home/you/Music/YouSpotter" />
+        <div style="color:#555;font-size:0.9em;">Files will be saved as <code>Artist/Album/Artist - Title.ext</code> inside this folder. Relative paths (e.g., <code>./</code>) are resolved from the directory where you start the app.</div>
+        <div id="err_host_path" style="color:#b00020;display:none;">Enter a valid folder path (not a file name).</div>
+      </div>
+      <div class="row">Bitrate (minimum source bitrate; lower is skipped)<br/>
+        <select id="bitrate" style="width:100%;"><option selected>128</option><option>192</option><option>256</option><option>320</option></select>
+        <div id="err_bitrate" style="color:#b00020;display:none;">Invalid bitrate.</div>
+      </div>
+      <div class="row">Format (output audio format)<br/>
+        <select id="format" style="width:100%;"><option selected>mp3</option><option>flac</option><option>m4a</option><option>wav</option></select>
+      </div>
+      <div class="row">Concurrency (max simultaneous downloads, 1–10)<br/>
+        <input id="concurrency" type="number" min="1" max="10" value="3" style="width:100%;" />
+        <div id="err_concurrency" style="color:#b00020;display:none;">Enter a number from 1 to 10.</div>
+      </div>
+      <div class="row">Folder and filename pattern<br/>
+        <input id="path_template" type="text" style="width:100%;" placeholder="{artist}/{album}/{artist} - {title}.{ext}" />
+        <div style="color:#555;font-size:0.9em;">Variables: {artist}, {album}, {title}, {ext}. Must include {ext}. Path must be relative to the Download Path.</div>
+        <div id="err_template" style="color:#b00020;display:none;">Enter a valid pattern using allowed variables and including {ext}.</div>
+      </div>
+      <div class="row">Redirect URI: <code id="redirect_uri"></code> <button id="copy_redirect">Copy</button></div>
+      <div class="row" style="display:flex;gap:8px;">
+        <button id="save">Save</button>
+        <button id="auth_btn" disabled>Authenticate with Spotify</button>
+      </div>
+    </aside>
+
+    <div id="playlists_block" style="display:none;">
+      <h2>Playlists</h2>
+      <div id="playlists" style="max-height:280px;overflow:auto;border:1px solid #ddd;padding:8px;"></div>
+      <div class="row"><span id="pl_count">0 selected</span></div>
+      <button id="save_pl">Save Playlists</button>
+    </div>
+
+    <script>
+      async function loadConfig() {
+        const r = await fetch('/config');
+        const cfg = await r.json();
+        document.getElementById('host_path').value = cfg.host_path || '';
+        document.getElementById('bitrate').value = String(cfg.bitrate || 192);
+        document.getElementById('format').value = String(cfg.format || 'mp3');
+        document.getElementById('concurrency').value = String(cfg.concurrency || 3);
+        document.getElementById('spotify_client_id').value = cfg.spotify_client_id || '';
+        document.getElementById('path_template').value = cfg.path_template || '{artist}/{album}/{artist} - {title}.{ext}';
+        if(document.getElementById('yt_cookie')) document.getElementById('yt_cookie').value = cfg.yt_cookie || '';
+      }
+      async function saveConfig() {
+        const body = {
+          host_path: document.getElementById('host_path').value,
+          bitrate: parseInt(document.getElementById('bitrate').value, 10),
+          format: document.getElementById('format').value,
+          concurrency: parseInt(document.getElementById('concurrency').value, 10),
+          spotify_client_id: document.getElementById('spotify_client_id').value,
+          path_template: document.getElementById('path_template').value,
+          yt_cookie: (document.getElementById('yt_cookie') && document.getElementById('yt_cookie').value) || ''
+        };
+        // Inline validation
+        let ok = true;
+        const show = (id, vis)=>{ const el=document.getElementById(id); if(el) el.style.display = vis? 'block':'none'; };
+        const hp = body.host_path.trim();
+        const looksLikeFile = /\.(mp3|flac|m4a|wav)$/i.test(hp);
+        if(!hp || looksLikeFile){ show('err_host_path', true); ok=false; } else show('err_host_path', false);
+        if(!body.spotify_client_id.trim()){ show('err_client_id', true); ok=false; } else show('err_client_id', false);
+        if([128,192,256,320].indexOf(body.bitrate)===-1){ show('err_bitrate', true); ok=false; } else show('err_bitrate', false);
+        if(!(body.concurrency>=1 && body.concurrency<=10)){ show('err_concurrency', true); ok=false; } else show('err_concurrency', false);
+        if(!ok) return;
+        const btn = document.getElementById('save'); btn.disabled = true;
+        const r = await fetch('/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+        btn.disabled = false;
+        if (!r.ok) return;
+        showSaved();
+        // Enable auth if configured
+        try { const st = await (await fetch('/app/state')).json(); document.getElementById('auth_btn').disabled = !(st.configured && !st.authenticated); } catch(e){}
+      }
+      async function loadStatus() {
+        const r = await fetch('/status');
+        const s = await r.json();
+        document.getElementById('missing').textContent = s.missing;
+        document.getElementById('downloading').textContent = s.downloading;
+        document.getElementById('downloaded').textContent = s.downloaded;
+        document.getElementById('songs').textContent = s.songs || 0;
+        document.getElementById('artists').textContent = s.artists || 0;
+        document.getElementById('albums').textContent = s.albums || 0;
+        document.getElementById('recent').textContent = (s.recent || []).join('\n');
+      }
+
+      async function loadQueue() {
+        const r = await fetch('/queue');
+        const q = await r.json();
+        const rows = [];
+        (q.pending||[]).forEach(x=> rows.push({song: `${x.artist||'unknown'} - ${x.title||''}`, status: 'Queued'}));
+        (q.current||[]).forEach(x=> rows.push({song: `${x.artist||'unknown'} - ${x.title||''}`, status: `Downloading ${x.progress||0}%`}));
+        (q.completed||[]).forEach(x=> rows.push({song: `${x.artist||'unknown'} - ${x.title||''}`, status: x.status==='downloaded'?'Done':`Error` }));
+        const tbody = document.getElementById('q_table');
+        tbody.innerHTML = '';
+        rows.forEach(rw=>{
+          const tr = document.createElement('tr');
+          const td1 = document.createElement('td'); td1.textContent = rw.song; td1.style.borderBottom='1px solid #eee';
+          const td2 = document.createElement('td'); td2.textContent = rw.status; td2.style.borderBottom='1px solid #eee';
+          tr.appendChild(td1); tr.appendChild(td2); tbody.appendChild(tr);
+        });
+      }
+      async function syncNow() {
+        await fetch('/sync-now', {method: 'POST'});
+        setTimeout(loadStatus, 1000);
+      }
+      function updateRedirectUri() {
+        document.getElementById('redirect_uri').textContent = window.location.origin + '/auth/callback';
+        const copyBtn = document.getElementById('copy_redirect');
+        if(copyBtn){ copyBtn.onclick = async ()=>{ try{ await navigator.clipboard.writeText(document.getElementById('redirect_uri').textContent); showSaved(); }catch(e){} } }
+      }
+      async function updateSpotifyHelpVisibility() {
+        try {
+          const r = await fetch('/auth/status');
+          const data = await r.json();
+          const dismissed = localStorage.getItem('spotify_help_dismissed') === '1';
+          const show = !data.authenticated && !dismissed;
+          document.getElementById('spotify_help').style.display = show ? 'block' : 'none';
+        } catch (_) {
+          // Fallback: show unless dismissed
+          const dismissed = localStorage.getItem('spotify_help_dismissed') === '1';
+          document.getElementById('spotify_help').style.display = dismissed ? 'none' : 'block';
+        }
+      }
+      function authClick() {
+        const cid = (document.getElementById('spotify_client_id').value || '').trim();
+        if (!cid) {
+          const el = document.getElementById('err_client_id');
+          if (el) el.style.display = 'block';
+          return;
+        }
+        window.location.href = '/auth/login';
+      }
+      // Sidebar open/close wiring
+      const sidebar = document.getElementById('sidebar');
+      const backdrop = document.getElementById('sidebar_backdrop');
+      function openSidebar(){ sidebar.style.display='block'; backdrop.style.display='block'; }
+      function closeSidebar(){ sidebar.style.display='none'; backdrop.style.display='none'; }
+      document.getElementById('open_sidebar').addEventListener('click', openSidebar);
+      document.getElementById('close_sidebar').addEventListener('click', closeSidebar);
+      backdrop.addEventListener('click', closeSidebar);
+      document.getElementById('auth_btn').addEventListener('click', authClick);
+      document.getElementById('spotify_help_close').addEventListener('click', () => {
+        localStorage.setItem('spotify_help_dismissed', '1');
+        document.getElementById('spotify_help').style.display = 'none';
+      });
+      document.getElementById('save').addEventListener('click', saveConfig);
+      document.getElementById('sync').addEventListener('click', syncNow);
+      // Tabs
+      function setActiveTab(name){
+        const bs = document.getElementById('tab_btn_status');
+        const bq = document.getElementById('tab_btn_queue');
+        const vs = document.getElementById('tab_status');
+        const vq = document.getElementById('tab_queue');
+        if(name==='status'){
+          vs.style.display='block'; vq.style.display='none';
+          bs.style.borderBottom='2px solid #111'; bq.style.borderBottom='2px solid transparent';
+          bs.setAttribute('aria-selected','true'); bq.setAttribute('aria-selected','false');
+          bs.setAttribute('tabindex','0'); bq.setAttribute('tabindex','-1');
+        } else {
+          vs.style.display='none'; vq.style.display='block';
+          bq.style.borderBottom='2px solid #111'; bs.style.borderBottom='2px solid transparent';
+          bq.setAttribute('aria-selected','true'); bs.setAttribute('aria-selected','false');
+          bq.setAttribute('tabindex','0'); bs.setAttribute('tabindex','-1');
+        }
+      }
+      document.getElementById('tab_btn_status').addEventListener('click', ()=>setActiveTab('status'));
+      document.getElementById('tab_btn_queue').addEventListener('click', ()=>setActiveTab('queue'));
+      // ARIA roles for tabs
+      document.getElementById('tabs').setAttribute('role','tablist');
+      document.getElementById('tab_btn_status').setAttribute('role','tab');
+      document.getElementById('tab_btn_queue').setAttribute('role','tab');
+      document.getElementById('tab_status').setAttribute('role','tabpanel');
+      document.getElementById('tab_queue').setAttribute('role','tabpanel');
+      document.getElementById('tab_btn_status').addEventListener('keydown', (e)=>{ if(e.key==='ArrowRight'){ setActiveTab('queue'); document.getElementById('tab_btn_queue').focus(); }});
+      document.getElementById('tab_btn_queue').addEventListener('keydown', (e)=>{ if(e.key==='ArrowLeft'){ setActiveTab('status'); document.getElementById('tab_btn_status').focus(); }});
+      async function loadPlaylists() {
+        const r = await fetch('/playlists');
+        const pls = await r.json();
+        const container = document.getElementById('playlists');
+        container.innerHTML = '';
+        pls.forEach(p => {
+          const id = 'pl_' + p.id;
+          const row = document.createElement('div');
+          row.className = 'row';
+          row.innerHTML = `<label><input type=\"checkbox\" id=\"${id}\" data-playlist-id=\"${p.id}\"> ${p.name} (${p.tracks})</label> <select id=\"${id}_strategy\">${["song-only","all-artist-songs","all-album-songs","all"].map(o=>`<option value=\\\"${o}\\\">${o}</option>`).join('')}</select>`;
+          container.appendChild(row);
+          const song = document.getElementById(`${id}_song`);
+          const artist = document.getElementById(`${id}_artist`);
+          const album = document.getElementById(`${id}_album`);
+          song.checked = !!p.song; artist.checked = !!p.artist; album.checked = !!p.album;
+          ;[song,artist,album].forEach(cb=> cb.addEventListener('change', updatePlCount));
+        });
+        updatePlCount();
+      }
+      function updatePlCount(){
+        const rows2 = Array.from(document.querySelectorAll('#playlists .row'));
+        const n2 = rows2.filter(row=>{
+          const hid = row.querySelector('input[type=hidden]'); if(!hid) return false;
+          const id = hid.getAttribute('id');
+          return row.querySelector(`#${id}_song`).checked || row.querySelector(`#${id}_artist`).checked || row.querySelector(`#${id}_album`).checked;
+        }).length;
+        document.getElementById('pl_count').textContent = `${n2} selected`;
+      }
+      async function savePlaylists() {
+        const rows = Array.from(document.querySelectorAll('#playlists .row'));
+        const items = rows.map(row => {
+          const hid = row.querySelector('input[type=hidden]'); if(!hid) return null;
+          const id = hid.getAttribute('id');
+          const pid = hid.getAttribute('data-playlist-id');
+          const song = row.querySelector(`#${id}_song`).checked;
+          const artist = row.querySelector(`#${id}_artist`).checked;
+          const album = row.querySelector(`#${id}_album`).checked;
+          return { id: pid, song, artist, album };
+        }).filter(x=> x && (x.song||x.artist||x.album));
+        const r = await fetch('/playlists', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items})});
+        if (!r.ok) {
+          const msg = document.createElement('div');
+          msg.textContent = 'Failed to save playlists';
+          msg.style.color = '#b00020';
+          document.getElementById('playlists_block').appendChild(msg);
+          setTimeout(()=>msg.remove(), 2000);
+          return false;
+        }
+        return true;
+      }
+      document.getElementById('save_pl').addEventListener('click', async ()=>{const ok = await savePlaylists(); if(ok) showSaved();});
+      async function gateViews(){
+        const r = await fetch('/app/state');
+        const st = await r.json();
+        const gated = document.getElementById('gated');
+        const plb = document.getElementById('playlists_block');
+        if(st.authenticated){
+          gated.style.display = 'block';
+          plb.style.display = 'block';
+        } else {
+          gated.style.display = 'none';
+          plb.style.display = 'none';
+        }
+      }
+      function showSaved(){
+        const msg = document.createElement('div');
+        msg.textContent = 'Saved';
+        msg.style.position='fixed';msg.style.bottom='12px';msg.style.right='12px';msg.style.background='#e6ffed';msg.style.border='1px solid #b7eb8f';msg.style.padding='8px 12px';msg.style.borderRadius='6px';
+        document.body.appendChild(msg); setTimeout(()=>msg.remove(), 1500);
+      }
+      async function init(){
+        await loadConfig();
+        updateRedirectUri();
+        await updateSpotifyHelpVisibility();
+        setActiveTab('status');
+        await gateViews();
+        if(document.getElementById('gated').style.display==='block'){
+          await loadPlaylists();
+          await loadStatus();
+          await loadQueue();
+          setInterval(loadStatus, 3000);
+          setInterval(loadQueue, 3000);
+        }
+      }
+      init();
+    </script>
+    <footer style="margin-top:24px;color:#555;font-size:0.9em;">
+      Disclaimer: Using YouTube Music with yt‑dl/yt‑dlp may violate YouTube’s Terms of Service. Use only for content you own or have rights to. You are solely responsible for how you use this software.
+    </footer>
+  </body>
+  </html>

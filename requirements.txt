@@ -1,0 +1,7 @@
+Flask==3.0.0
+pytest==8.2.0
+pytest-cov==5.0.0
+requests==2.32.3
+spotipy==2.23.0
+ytmusicapi==1.8.2
+yt-dlp==2024.08.06
