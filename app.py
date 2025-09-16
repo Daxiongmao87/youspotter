@@ -3,7 +3,7 @@ from pathlib import Path
 from youspotter import create_app
 from youspotter.storage import DB
 from youspotter.spotify_client import SpotifyClient
-from youspotter.youtube_client import YouTubeClient
+from youspotter.youtube_client import YouTubeMusicClient
 from youspotter.downloader_yt import download_audio
 from youspotter.sync_service import SyncService
 import json
@@ -19,7 +19,7 @@ def build_app():
     db_path = os.environ.get('YOUSPOTTER_DB', str(Path.cwd() / 'youspotter.db'))
     db = DB(Path(db_path))
     sp = SpotifyClient(db)
-    yt = YouTubeClient()
+    yt = YouTubeMusicClient()
 
     def fetch_tracks():
         # For MVP: read selected playlist IDs from settings, else empty list
@@ -32,10 +32,24 @@ def build_app():
                 strategies[pid] = {'song': True, 'artist': False, 'album': False}
         ids = list(strategies.keys())
         tracks = []
-        for pid in ids:
-            for t in sp.playlist_tracks(pid):
-                t['playlist_id'] = pid
-                tracks.append(t)
+        try:
+            for pid in ids:
+                for t in sp.playlist_tracks(pid):
+                    t['playlist_id'] = pid
+                    tracks.append(t)
+        except RuntimeError as e:
+            error_str = str(e)
+            if error_str == "refresh_token_revoked":
+                # Token was revoked, user needs to re-authenticate
+                return []
+            elif error_str == "not_authenticated":
+                # No tokens available, user needs to authenticate
+                return []
+            elif error_str.startswith("spotify_refresh_failed_http_"):
+                # HTTP error during token refresh, treat as authentication failure
+                return []
+            else:
+                raise
         return tracks
 
     def fetch_strategies():
@@ -45,7 +59,20 @@ def build_app():
         except Exception:
             return {}
 
-    service = SyncService(fetch_tracks, yt.search_song, download_audio, db=db, fetch_playlist_strategies=fetch_strategies, spotify_client=sp)
+    # Create app first to get the refresh function
+    app = create_app(service=None, db_path=db_path)
+
+    # Now create service with the catalog refresh callback
+    service = SyncService(
+        fetch_tracks,
+        yt.search_song,
+        download_audio,
+        concurrency_cap=1,
+        db=db,
+        fetch_playlist_strategies=fetch_strategies,
+        spotify_client=sp,
+        catalog_refresh_callback=app.refresh_catalog_cache,
+    )
     # Register status persistence snapshot hooks
     from youspotter import status as st
     def load_snapshot():
@@ -60,11 +87,17 @@ def build_app():
         except Exception:
             pass
     st.register_persistence(load_snapshot, save_snapshot)
-    app = create_app(service=service, db_path=db_path)
+
+    # Now create the app with the service
+    app_with_service = create_app(service=service, db_path=db_path)
+
+    # Start download worker immediately (processes pending downloads)
+    service.start_download_worker()
+
     # Start scheduler only when minimal config is present (daemon behavior once configured)
     if _config_ready(db):
         service.start_scheduler(interval_seconds=900)
-    return app
+    return app_with_service
 
 
 if __name__ == '__main__':
