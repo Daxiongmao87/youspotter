@@ -11,14 +11,25 @@ class DB:
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Allow usage across Flask's threaded request handlers
-        self.conn = sqlite3.connect(str(self.path), check_same_thread=False)
-        self.conn.execute("PRAGMA journal_mode=WAL;")
-        self._lock = threading.Lock()
-        self._migrate()
+        # Use thread-local connections to prevent deadlocks
+        self._local = threading.local()
+        self._global_lock = threading.Lock()
+        # Initialize the primary connection for migration
+        with self._global_lock:
+            conn = sqlite3.connect(str(self.path))
+            conn.execute("PRAGMA journal_mode=WAL;")
+            self._migrate(conn)
+            conn.close()
 
-    def _migrate(self):
-        cur = self.conn.cursor()
+    def _get_connection(self):
+        """Get thread-local database connection"""
+        if not hasattr(self._local, 'conn') or self._local.conn is None:
+            self._local.conn = sqlite3.connect(str(self.path))
+            self._local.conn.execute("PRAGMA journal_mode=WAL;")
+        return self._local.conn
+
+    def _migrate(self, conn):
+        cur = conn.cursor()
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS settings (
@@ -46,35 +57,35 @@ class DB:
             );
             """
         )
-        self.conn.commit()
+        conn.commit()
 
     def set_setting(self, key: str, value: str):
-        with self._lock:
-            self.conn.execute(
-                "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, value),
-            )
-            self.conn.commit()
+        conn = self._get_connection()
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        conn.commit()
 
     def get_setting(self, key: str) -> Optional[str]:
-        with self._lock:
-            cur = self.conn.execute("SELECT value FROM settings WHERE key=?", (key,))
-            row = cur.fetchone()
-            return row[0] if row else None
+        conn = self._get_connection()
+        cur = conn.execute("SELECT value FROM settings WHERE key=?", (key,))
+        row = cur.fetchone()
+        return row[0] if row else None
 
     def set_kv(self, key: str, value: str):
-        with self._lock:
-            self.conn.execute(
-                "INSERT INTO kvstore(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, value),
-            )
-            self.conn.commit()
+        conn = self._get_connection()
+        conn.execute(
+            "INSERT INTO kvstore(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        conn.commit()
 
     def get_kv(self, key: str) -> Optional[str]:
-        with self._lock:
-            cur = self.conn.execute("SELECT value FROM kvstore WHERE key=?", (key,))
-            row = cur.fetchone()
-            return row[0] if row else None
+        conn = self._get_connection()
+        cur = conn.execute("SELECT value FROM kvstore WHERE key=?", (key,))
+        row = cur.fetchone()
+        return row[0] if row else None
 
 
 class TokenStore:
@@ -105,3 +116,14 @@ class TokenStore:
             self.db.get_setting("spotify_access_token"),
             self.db.get_setting("spotify_refresh_token"),
         )
+
+    def clear(self):
+        # Clear tokens from both keyring and DB
+        try:
+            import keyring  # type: ignore
+            keyring.delete_password('youspotter', 'spotify_access_token')
+            keyring.delete_password('youspotter', 'spotify_refresh_token')
+        except Exception:
+            pass
+        self.db.set_setting("spotify_access_token", "")
+        self.db.set_setting("spotify_refresh_token", "")

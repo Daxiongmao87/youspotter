@@ -3,101 +3,217 @@
   <head>
     <meta charset="utf-8" />
     <title>YouSpotter</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Condensed:ital,wght@0,100..900;1,100..900&family=Montserrat:ital,wght@0,100..900;1,100..900&family=Rethink+Sans:ital,wght@0,400..800;1,400..800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/app.css" />
     <style>
-      body { font-family: sans-serif; margin: 2rem; }
-      .row { margin: 0.5rem 0; }
-      input[type=text], select { width: 300px; }
-      pre { background: #f5f5f5; padding: 1rem; }
+      /* Responsive queue tables */
+      @media (max-width: 768px) {
+        .queue-results-grid {
+          grid-template-columns: 1fr !important;
+          gap: 16px !important;
+        }
+      }
     </style>
+
   </head>
   <body>
-    <h1 style="display:flex;align-items:center;justify-content:space-between;">
-      <span>YouSpotter</span>
-      <button id="open_sidebar" title="Open Settings">⚙️ Settings</button>
-    </h1>
+    <header class="appbar">
+      <div class="brand"><span class="you grad">You</span><span class="spot grad">Spot</span><span class="ter grad">ter</span></div>
+      <div>
+        <button id="theme_toggle" class="theme-toggle" title="Toggle theme" aria-label="Toggle theme">🌙</button>
+        <button id="open_sidebar" class="btn ml-sm" title="Open Settings">⚙️ Settings</button>
+      </div>
+    </header>
+    <div class="container">
     <div id="gated">
-      <div id="tabs" class="row" style="display:flex;gap:8px;border-bottom:1px solid #ddd;margin-bottom:8px;">
-        <button id="tab_btn_status" class="tab active" style="border:none;background:transparent;padding:8px;border-bottom:2px solid #111;cursor:pointer;">Music Status</button>
-        <button id="tab_btn_queue" class="tab" style="border:none;background:transparent;padding:8px;cursor:pointer;">Download Queue</button>
+      <div id="tabs" class="row">
+        <button id="tab_btn_status" class="tab active">Music Status</button>
+        <button id="tab_btn_queue" class="tab">Download Queue</button>
       </div>
 
-      <div id="tab_status" style="display:block;">
-        <h2>Status</h2>
-        <div id="tracking">
-          <div class="row">Missing: <span id="missing">0</span> | Downloading: <span id="downloading">0</span> | Downloaded: <span id="downloaded">0</span></div>
-          <div class="row">Songs: <span id="songs">0</span> | Artists: <span id="artists">0</span> | Albums: <span id="albums">0</span></div>
-          <div class="row"><button id="sync">Sync Now</button></div>
-          <div class="row"><strong>Recent Activity</strong></div>
-          <pre id="recent"></pre>
+      <div id="tab_status">
+        <h2>Music Tracking Status</h2>
+
+        <!-- Recent Activity Log Section -->
+        <div class="row">
+          <strong>Recent Activity</strong>
+        </div>
+        <div id="activity_log" style="height: 120px; overflow-y: auto; border: 1px solid #ddd; padding: 8px; margin-bottom: 16px; background: #2a2a2a; color: #e0e0e0; font-family: monospace; font-size: 12px;">
+          <div id="recent"></div>
+        </div>
+
+        <!-- Compact Status Line -->
+        <div id="tracking" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+          <div>
+            Missing: <span id="missing">0</span> | Downloading: <span id="downloading">0</span> | Downloaded: <span id="downloaded">0</span> |
+            Songs: <span id="songs">0</span> | Artists: <span id="artists">0</span> | Albums: <span id="albums">0</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <button id="sync" class="btn btn-primary">Sync Now</button>
+            <span class="muted small" id="scheduler_info" aria-live="polite"></span>
+          </div>
+        </div>
+
+        <!-- Catalog Grid Section -->
+        <div id="catalog_section">
+          <div class="row" style="margin-bottom: 8px;">
+            <strong>Catalog</strong>
+            <div style="margin-left: 16px;">
+              <button id="catalog_songs" class="btn btn-sm active">Songs</button>
+              <button id="catalog_artists" class="btn btn-sm">Artists</button>
+              <button id="catalog_albums" class="btn btn-sm">Albums</button>
+            </div>
+          </div>
+          <div class="row" style="margin-bottom: 8px; gap: 12px;">
+            <input type="text" id="catalog_search" placeholder="Search catalog..." style="padding: 6px; border: 1px solid #ddd; border-radius: 4px; flex: 1;">
+            <select id="catalog_status_filter" style="padding: 6px; border: 1px solid #ddd; border-radius: 4px;">
+              <option value="">All statuses</option>
+              <option value="queued">Queued</option>
+              <option value="downloading">Downloading</option>
+              <option value="downloaded">Downloaded</option>
+              <option value="missing">Missing/Error</option>
+            </select>
+          </div>
+          <div id="catalog_grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; max-height: 400px; overflow-y: auto;">
+            <!-- Grid items will be populated here -->
+          </div>
         </div>
       </div>
 
-      <div id="tab_queue" style="display:none;">
+      <div id="tab_queue" class="hidden">
         <h2>Download Queue</h2>
-        <table style="width:100%;border-collapse:collapse;">
-          <thead><tr><th style="text-align:left;border-bottom:1px solid #ddd;">Song</th><th style="text-align:left;border-bottom:1px solid #ddd;">Status</th></tr></thead>
-          <tbody id="q_table"></tbody>
-        </table>
+
+        <!-- Active Download Display (Front and Center) -->
+        <div id="active_download" class="row" style="background: var(--surface); border: 2px solid var(--green); border-radius: var(--radius); padding: 16px; margin-bottom: 20px; text-align: center;">
+          <div id="current_download_info">
+            <div id="download_status" style="font-size: 18px; font-weight: 600; margin-bottom: 8px;">No active download</div>
+            <div id="download_progress_container" class="hidden">
+              <div style="margin-bottom: 8px;">
+                <span id="current_song">-</span>
+              </div>
+              <div class="progress" style="margin: 0 auto;">
+                <span id="progress_bar" style="width: 0%;"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="row" style="margin-bottom: 16px; display: flex; gap: 12px; align-items: center;">
+          <button id="pause_resume_btn" onclick="togglePauseResume()" class="btn btn-primary">⏸️ Pause</button>
+          <button onclick="resetErrors()" class="btn">🔄 Reset Errors</button>
+          <input type="text" id="queue_search" placeholder="Search..." style="padding: 6px; border: 1px solid var(--outline); border-radius: 4px; flex: 1;">
+        </div>
+
+        <!-- Side-by-side Queue and Results Tables -->
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 16px;" class="queue-results-grid">
+          <!-- Queue Table (Left) -->
+          <div>
+            <h3 style="margin-bottom: 8px;">Pending Queue</h3>
+            <div id="queue_info" class="text-sm muted" style="margin-bottom: 8px;"></div>
+            <table>
+              <thead><tr><th>Song</th><th>Album</th><th>Status</th></tr></thead>
+              <tbody id="queue_table"></tbody>
+            </table>
+            <div id="queue_pagination" class="row"></div>
+          </div>
+
+          <!-- Results Table (Right) -->
+          <div>
+            <h3 style="margin-bottom: 8px;">Results</h3>
+            <div class="row text-sm muted" style="margin-bottom: 8px;">Legend: <span class="status-badge ok ml-sm"><span class="status-icon" aria-hidden="true">✓</span><span>Downloaded</span></span> <span class="ml-sm">•</span> <span class="status-badge err ml-sm"><span class="status-icon" aria-hidden="true">!</span><span>Error</span></span></div>
+            <table>
+              <thead><tr><th>Song</th><th>Album</th><th>Status</th><th>Time</th></tr></thead>
+              <tbody id="results_table"></tbody>
+            </table>
+            <div id="results_pagination" class="row"></div>
+          </div>
+        </div>
       </div>
     </div>
 
-    <div id="sidebar_backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.35);"></div>
-    <aside id="sidebar" style="display:none;position:fixed;top:0;right:0;width:380px;height:100vh;background:#fff;color:#111;border-left:1px solid #ddd;box-shadow:-4px 0 10px rgba(0,0,0,0.1);padding:16px;overflow:auto;z-index:1000;">
-      <div style="display:flex;align-items:center;justify-content:space-between;">
-        <h2 style="margin:0;">Settings</h2>
-        <button id="close_sidebar" title="Close" style="border:none;background:transparent;font-size:20px;cursor:pointer">✕</button>
+
+    <div id="sidebar_backdrop"></div>
+    <aside id="sidebar">
+      <div class="flex-split">
+        <h2 class="no-margin">Settings</h2>
+        <button id="close_sidebar" class="btn" title="Close">✕</button>
       </div>
-      <div class="row" style="margin-top:10px;color:#333;font-size:0.95em;">
+      <div class="row muted mt-md text-sm">
         <strong>Spotify Setup (one-time)</strong>
       </div>
-      <div class="row" id="spotify_help" style="background:#fffbdd;border:1px solid #f2e09b;padding:10px;border-radius:6px;position:relative;display:none;">
-        <button id="spotify_help_close" title="Hide" style="position:absolute;right:8px;top:8px;border:none;background:transparent;font-size:16px;cursor:pointer">✕</button>
-        <ol style="margin:0 0 0 18px;">
+      <div class="row help-card hidden" id="spotify_help">
+        <button id="spotify_help_close" class="icon-btn abs-top-right" title="Hide">✕</button>
+        <ol class="ol-compact">
           <li>Open <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a> → Create an app → When asked "Which API/SDKs are you planning to use?" select <strong>Web API</strong> only (do not select Ads API, Web Playback SDK, iOS, or Android).</li>
           <li>Copy the <em>Client ID</em> and paste it below.</li>
-          <li>In your Spotify app settings, add this Redirect URI exactly: <code id="redirect_uri"></code> then save.</li>
+          <li>In your Spotify app settings, add this Redirect URI exactly: <code id="redirect_uri_text"></code> then save.</li>
           <li>Back here, click <em>Save</em>, then click <em>Authenticate with Spotify</em>.</li>
         </ol>
-        <div style="margin-top:6px;color:#555;">No client secret is needed. PKCE is used and tokens are stored locally for the daemon. Required scopes are requested automatically during authentication (playlist-read-private, playlist-read-collaborative).</div>
+        <div class="muted small mt-sm">No client secret is needed. PKCE is used and tokens are stored locally for the daemon. Required scopes are requested automatically during authentication (playlist-read-private, playlist-read-collaborative).</div>
       </div>
-      <div class="row" style="margin-top:6px;">Spotify Client ID (required)<br/>
-        <input id="spotify_client_id" type="text" style="width:100%;" />
-        <div id="err_client_id" style="color:#b00020;display:none;">Client ID is required.</div>
+      <div class="row mt-sm">Spotify Client ID (required)<br/>
+        <input id="spotify_client_id" type="text" />
+        <div id="err_client_id" class="error-text hidden">Client ID is required.</div>
       </div>
-      <div class="row">Download Path (folder only)<br/>
-        <input id="host_path" type="text" style="width:100%;" placeholder="/home/you/Music/YouSpotter" />
-        <div style="color:#555;font-size:0.9em;">Files will be saved as <code>Artist/Album/Artist - Title.ext</code> inside this folder. Relative paths (e.g., <code>./</code>) are resolved from the directory where you start the app.</div>
-        <div id="err_host_path" style="color:#b00020;display:none;">Enter a valid folder path (not a file name).</div>
+      <div class="row"><label class="form-label">Download Path (folder only)</label>
+        <input id="host_path" type="text" placeholder="/home/you/Music/YouSpotter" />
+        <div class="muted small">Use an absolute path (e.g., <code>/home/you/Music/YouSpotter</code>). Files are saved inside this folder using your pattern below.</div>
+        <div id="err_host_path" class="error-text hidden">Enter a valid folder path (not a file name).</div>
       </div>
       <div class="row">Bitrate (minimum source bitrate; lower is skipped)<br/>
-        <select id="bitrate" style="width:100%;"><option selected>128</option><option>192</option><option>256</option><option>320</option></select>
-        <div id="err_bitrate" style="color:#b00020;display:none;">Invalid bitrate.</div>
+        <select id="bitrate"><option selected>128</option><option>192</option><option>256</option><option>320</option></select>
+        <div id="err_bitrate" class="error-text hidden">Invalid bitrate.</div>
       </div>
       <div class="row">Format (output audio format)<br/>
-        <select id="format" style="width:100%;"><option selected>mp3</option><option>flac</option><option>m4a</option><option>wav</option></select>
+        <select id="format"><option selected>mp3</option><option>flac</option><option>m4a</option><option>wav</option></select>
       </div>
-      <div class="row">Concurrency (max simultaneous downloads, 1–10)<br/>
-        <input id="concurrency" type="number" min="1" max="10" value="3" style="width:100%;" />
-        <div id="err_concurrency" style="color:#b00020;display:none;">Enter a number from 1 to 10.</div>
+      <div class="row"><label class="form-label">Folder and filename pattern</label>
+        <input id="path_template" type="text" placeholder="{artist}/{album}/{artist} - {title}.{ext}" />
+        <div class="muted small">Variables: {artist}, {album}, {title}, {ext}. {ext} expands to the selected Format. Path must be relative to the Download Path.</div>
+        <div id="err_template" class="error-text hidden">Enter a valid pattern using allowed variables and including {ext}.</div>
       </div>
-      <div class="row">Folder and filename pattern<br/>
-        <input id="path_template" type="text" style="width:100%;" placeholder="{artist}/{album}/{artist} - {title}.{ext}" />
-        <div style="color:#555;font-size:0.9em;">Variables: {artist}, {album}, {title}, {ext}. Must include {ext}. Path must be relative to the Download Path.</div>
-        <div id="err_template" style="color:#b00020;display:none;">Enter a valid pattern using allowed variables and including {ext}.</div>
+      <div class="row"><label class="form-label">YouTube Cookie Header (optional)</label>
+        <textarea id="yt_cookie" rows="2" placeholder="SID=...; HSID=...; __Secure-1PSID=...;"></textarea>
+        <div class="muted small">Paste the cookie string from YouTube (one line). Used for downloading private/region-locked content via yt-dlp.</div>
+        <details class="help-card mt-sm text-sm">
+          <summary>How to get your YouTube cookie header</summary>
+          <ol class="ol-compact">
+            <li>Open <code>youtube.com</code> and sign in.</li>
+            <li>Open Developer Tools (Ctrl+Shift+I / Cmd+Option+I) → Network.</li>
+            <li>Reload the page. Click any request to <em>youtube.com</em> (e.g., <code>sw.js</code> or <code>youtubei</code>).</li>
+            <li>In the right pane, Headers → Request Headers → find <code>Cookie</code>.</li>
+            <li>Right‑click the value and Copy → Value. Paste here (single line).</li>
+          </ol>
+          <div class="muted small mt-sm">Keep this private. Used only for yt-dlp downloads, not for search (which uses YouTube Music API).</div>
+        </details>
       </div>
-      <div class="row">Redirect URI: <code id="redirect_uri"></code> <button id="copy_redirect">Copy</button></div>
-      <div class="row" style="display:flex;gap:8px;">
-        <button id="save">Save</button>
-        <button id="auth_btn" disabled>Authenticate with Spotify</button>
+      <div class="row">
+        <div class="inline-field">
+          <input type="checkbox" id="use_strict_matching" />
+          <label for="use_strict_matching" class="form-label">Use strict matching (exact artist/title required)</label>
+        </div>
+        <div class="muted small">When enabled, YouTube matching requires exact artist and title matches. When disabled, uses fuzzy matching to find similar tracks (recommended).</div>
+      </div>
+      <div class="row"><label class="form-label">Redirect URI</label>
+        <div class="inline-field"><input id="redirect_uri" class="code-chip code-input" type="text" readonly aria-live="polite" /> <button id="copy_redirect" class="btn">Copy</button></div>
+        <div class="muted small">Add this exact URI to your Spotify app’s Redirect URIs (in the Spotify Developer Dashboard) and Save.</div>
+      </div>
+      <div class="row actions-row">
+        <button id="save" class="btn btn-primary">Save</button>
+        <button id="auth_btn" class="btn" disabled>Authenticate with Spotify</button>
+      </div>
+
+      <div id="playlists_block" class="hidden">
+        <h3>Playlists</h3>
+        <div class="muted small mt-sm">Choose what to sync per playlist. Check Song to sync only the playlist tracks; Artist to expand to full artist discographies; Album to expand to full albums. You can combine them — we'll deduplicate.</div>
+        <div id="playlists" class="scroll-panel" aria-label="Playlists list"></div>
+        <div class="row"><span id="pl_count">0 selected</span></div>
+        <button id="save_pl" class="btn btn-primary">Save Playlists</button>
       </div>
     </aside>
-
-    <div id="playlists_block" style="display:none;">
-      <h2>Playlists</h2>
-      <div id="playlists" style="max-height:280px;overflow:auto;border:1px solid #ddd;padding:8px;"></div>
-      <div class="row"><span id="pl_count">0 selected</span></div>
-      <button id="save_pl">Save Playlists</button>
-    </div>
 
     <script>
       async function loadConfig() {
@@ -106,38 +222,44 @@
         document.getElementById('host_path').value = cfg.host_path || '';
         document.getElementById('bitrate').value = String(cfg.bitrate || 192);
         document.getElementById('format').value = String(cfg.format || 'mp3');
-        document.getElementById('concurrency').value = String(cfg.concurrency || 3);
         document.getElementById('spotify_client_id').value = cfg.spotify_client_id || '';
         document.getElementById('path_template').value = cfg.path_template || '{artist}/{album}/{artist} - {title}.{ext}';
         if(document.getElementById('yt_cookie')) document.getElementById('yt_cookie').value = cfg.yt_cookie || '';
+        document.getElementById('use_strict_matching').checked = cfg.use_strict_matching || false;
       }
       async function saveConfig() {
         const body = {
           host_path: document.getElementById('host_path').value,
           bitrate: parseInt(document.getElementById('bitrate').value, 10),
           format: document.getElementById('format').value,
-          concurrency: parseInt(document.getElementById('concurrency').value, 10),
           spotify_client_id: document.getElementById('spotify_client_id').value,
           path_template: document.getElementById('path_template').value,
-          yt_cookie: (document.getElementById('yt_cookie') && document.getElementById('yt_cookie').value) || ''
+          yt_cookie: (document.getElementById('yt_cookie') && document.getElementById('yt_cookie').value) || '',
+          use_strict_matching: document.getElementById('use_strict_matching').checked
         };
         // Inline validation
         let ok = true;
-        const show = (id, vis)=>{ const el=document.getElementById(id); if(el) el.style.display = vis? 'block':'none'; };
+        const show = (id, vis)=>{ const el=document.getElementById(id); if(!el) return; el.classList.toggle('hidden', !vis); };
         const hp = body.host_path.trim();
-        const looksLikeFile = /\.(mp3|flac|m4a|wav)$/i.test(hp);
-        if(!hp || looksLikeFile){ show('err_host_path', true); ok=false; } else show('err_host_path', false);
+        const isAbs = hp.startsWith('/');
+        if(!hp || !isAbs){ show('err_host_path', true); ok=false; } else show('err_host_path', false);
         if(!body.spotify_client_id.trim()){ show('err_client_id', true); ok=false; } else show('err_client_id', false);
         if([128,192,256,320].indexOf(body.bitrate)===-1){ show('err_bitrate', true); ok=false; } else show('err_bitrate', false);
-        if(!(body.concurrency>=1 && body.concurrency<=10)){ show('err_concurrency', true); ok=false; } else show('err_concurrency', false);
         if(!ok) return;
         const btn = document.getElementById('save'); btn.disabled = true;
         const r = await fetch('/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
         btn.disabled = false;
         if (!r.ok) return;
         showSaved();
-        // Enable auth if configured
-        try { const st = await (await fetch('/app/state')).json(); document.getElementById('auth_btn').disabled = !(st.configured && !st.authenticated); } catch(e){}
+        // Enable auth if configured and auto-load playlists when ready
+        try {
+          const st = await (await fetch('/app/state')).json();
+          document.getElementById('auth_btn').disabled = !(st.configured && !st.authenticated);
+          if (st.configured && st.authenticated) {
+            await gateViews();
+            await loadPlaylists();
+          }
+        } catch(e){}
       }
       async function loadStatus() {
         const r = await fetch('/status');
@@ -148,33 +270,328 @@
         document.getElementById('songs').textContent = s.songs || 0;
         document.getElementById('artists').textContent = s.artists || 0;
         document.getElementById('albums').textContent = s.albums || 0;
-        document.getElementById('recent').textContent = (s.recent || []).join('\n');
+        // Format recent activity log with proper line breaks and color coding
+        const recentDiv = document.getElementById('recent');
+        const recentEntries = s.recent || [];
+        if (recentEntries.length === 0) {
+          recentDiv.innerHTML = '<div style="color: #888; font-style: italic;">No recent activity</div>';
+        } else {
+          recentDiv.innerHTML = recentEntries.map(entry => {
+            // Color code based on log level
+            let color = '#e0e0e0'; // default
+            if (entry.includes('SUCCESS:')) color = '#4ade80'; // green
+            else if (entry.includes('ERROR:')) color = '#ef4444'; // red
+            else if (entry.includes('INFO:')) color = '#60a5fa'; // blue
+            return `<div style="color: ${color}; margin-bottom: 2px;">${entry}</div>`;
+          }).join('');
+        }
+        try {
+          const sch = s.schedule || {};
+          const el = document.getElementById('scheduler_info');
+          const iv = parseInt(sch.interval_seconds || 900, 10);
+          const next = parseInt(sch.next_sync_epoch || 0, 10) * 1000;
+          let msg = `Auto-sync every ${Math.round((iv||900)/60)} min.`;
+          if (next) {
+            const diff = Math.max(0, next - Date.now());
+            const mm = Math.floor(diff/60000);
+            const ss = Math.floor((diff%60000)/1000).toString().padStart(2,'0');
+            msg += ` Next in: ${mm}:${ss}`;
+          }
+          el.textContent = msg;
+        } catch (_) {}
       }
 
-      async function loadQueue() {
-        const r = await fetch('/queue');
-        const q = await r.json();
-        const rows = [];
-        (q.pending||[]).forEach(x=> rows.push({song: `${x.artist||'unknown'} - ${x.title||''}`, status: 'Queued'}));
-        (q.current||[]).forEach(x=> rows.push({song: `${x.artist||'unknown'} - ${x.title||''}`, status: `Downloading ${x.progress||0}%`}));
-        (q.completed||[]).forEach(x=> rows.push({song: `${x.artist||'unknown'} - ${x.title||''}`, status: x.status==='downloaded'?'Done':`Error` }));
-        const tbody = document.getElementById('q_table');
+      let currentQueuePage = 1;
+      let currentResultsPage = 1;
+      async function loadQueue(queuePage = 1, resultsPage = 1) {
+        currentQueuePage = queuePage;
+        currentResultsPage = resultsPage;
+
+        // Load queue data
+        const queueResponse = await fetch(`/queue?page=${queuePage}&page_size=50`);
+        const queueData = await queueResponse.json();
+
+        // Update active download display
+        updateActiveDownload(queueData);
+
+        // Update queue table (pending items only)
+        updateQueueTable(queueData);
+
+        // Update results table (completed items only)
+        updateResultsTable(queueData);
+
+        // Update queue info
+        const queueInfo = document.getElementById('queue_info');
+        const totalPending = queueData.pending_total || 0;
+        const totalCurrent = queueData.current_total || 0;
+        queueInfo.textContent = `${totalPending} pending, ${totalCurrent} downloading`;
+      }
+
+      function updateActiveDownload(data) {
+        const statusEl = document.getElementById('download_status');
+        const progressContainer = document.getElementById('download_progress_container');
+        const currentSongEl = document.getElementById('current_song');
+        const progressBar = document.getElementById('progress_bar');
+
+        const currentItems = data.current || [];
+        if (currentItems.length > 0) {
+          const current = currentItems[0];
+          const artist = current.artist || 'Unknown Artist';
+          const title = current.title || 'Unknown Title';
+          const progress = current.progress || 0;
+
+          statusEl.textContent = 'Downloading...';
+          currentSongEl.textContent = `${artist} - ${title}`;
+          progressBar.style.width = `${progress}%`;
+          progressContainer.classList.remove('hidden');
+        } else if (isPaused) {
+          statusEl.textContent = 'Downloads Paused';
+          progressContainer.classList.add('hidden');
+        } else {
+          statusEl.textContent = 'No active download';
+          progressContainer.classList.add('hidden');
+        }
+      }
+
+      function updateQueueTable(data) {
+        const tbody = document.getElementById('queue_table');
         tbody.innerHTML = '';
-        rows.forEach(rw=>{
-          const tr = document.createElement('tr');
-          const td1 = document.createElement('td'); td1.textContent = rw.song; td1.style.borderBottom='1px solid #eee';
-          const td2 = document.createElement('td'); td2.textContent = rw.status; td2.style.borderBottom='1px solid #eee';
-          tr.appendChild(td1); tr.appendChild(td2); tbody.appendChild(tr);
+
+        const pendingItems = data.pending || [];
+        pendingItems.forEach(item => {
+          const row = tbody.insertRow();
+          const artist = item.artist || 'Unknown Artist';
+          const title = item.title || 'Unknown Title';
+          const album = item.album || 'Unknown Album';
+
+          row.innerHTML = `
+            <td>${artist} - ${title}</td>
+            <td>${album}</td>
+            <td><span class="status-badge"><span class="status-icon">⏳</span>Queued</span></td>
+          `;
         });
+
+        // Update pagination for queue
+        updateQueuePagination(data);
+      }
+
+      function updateResultsTable(data) {
+        const tbody = document.getElementById('results_table');
+        tbody.innerHTML = '';
+
+        const completedItems = data.completed || [];
+        completedItems.forEach(item => {
+          const row = tbody.insertRow();
+          const artist = item.artist || 'Unknown Artist';
+          const title = item.title || 'Unknown Title';
+          const album = item.album || 'Unknown Album';
+          const status = item.status || 'unknown';
+          const timestamp = item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : '-';
+
+          const statusBadge = status === 'downloaded'
+            ? '<span class="status-badge ok"><span class="status-icon">✓</span>Downloaded</span>'
+            : '<span class="status-badge err"><span class="status-icon">!</span>Error</span>';
+
+          row.innerHTML = `
+            <td>${artist} - ${title}</td>
+            <td>${album}</td>
+            <td>${statusBadge}</td>
+            <td>${timestamp}</td>
+          `;
+        });
+
+        // Update pagination for results
+        updateResultsPagination(data);
+      }
+
+      function updateQueuePagination(data) {
+        const queueItems = [...(data.current || []), ...(data.pending || [])];
+        const itemsPerPage = 20;
+        const totalItems = queueItems.length;
+        const totalPages = Math.ceil(totalItems / itemsPerPage);
+
+        const controls = document.getElementById('queue_pagination');
+        controls.innerHTML = '';
+
+        if (totalPages <= 1) return;
+
+        // Page info
+        const info = document.createElement('span');
+        info.className = 'text-sm muted';
+        info.textContent = `Page ${currentQueuePage} of ${totalPages} (${totalItems} items in queue)`;
+        controls.appendChild(info);
+
+        // Previous button
+        const prevBtn = document.createElement('button');
+        prevBtn.className = 'btn ml-sm';
+        prevBtn.textContent = 'Previous';
+        prevBtn.disabled = currentQueuePage <= 1;
+        prevBtn.onclick = () => loadQueue(currentQueuePage - 1, currentResultsPage);
+        controls.appendChild(prevBtn);
+
+        // Next button
+        const nextBtn = document.createElement('button');
+        nextBtn.className = 'btn ml-sm';
+        nextBtn.textContent = 'Next';
+        nextBtn.disabled = currentQueuePage >= totalPages;
+        nextBtn.onclick = () => loadQueue(currentQueuePage + 1, currentResultsPage);
+        controls.appendChild(nextBtn);
+      }
+
+      function updateResultsPagination(data) {
+        const completedItems = data.completed || [];
+        const itemsPerPage = 20;
+        const totalItems = completedItems.length;
+        const totalPages = Math.ceil(totalItems / itemsPerPage);
+
+        const controls = document.getElementById('results_pagination');
+        controls.innerHTML = '';
+
+        if (totalPages <= 1) return;
+
+        // Page info
+        const info = document.createElement('span');
+        info.className = 'text-sm muted';
+        info.textContent = `Page ${currentResultsPage} of ${totalPages} (${totalItems} completed items)`;
+        controls.appendChild(info);
+
+        // Previous button
+        const prevBtn = document.createElement('button');
+        prevBtn.className = 'btn ml-sm';
+        prevBtn.textContent = 'Previous';
+        prevBtn.disabled = currentResultsPage <= 1;
+        prevBtn.onclick = () => loadQueue(currentQueuePage, currentResultsPage - 1);
+        controls.appendChild(prevBtn);
+
+        // Next button
+        const nextBtn = document.createElement('button');
+        nextBtn.className = 'btn ml-sm';
+        nextBtn.textContent = 'Next';
+        nextBtn.disabled = currentResultsPage >= totalPages;
+        nextBtn.onclick = () => loadQueue(currentQueuePage, currentResultsPage + 1);
+        controls.appendChild(nextBtn);
+      }
+
+      function updatePaginationControls(currentPage, totalPages, totalItems) {
+        const controls = document.getElementById('pagination_controls');
+        controls.innerHTML = '';
+
+        if (totalPages <= 1) return;
+
+        const info = document.createElement('span');
+        info.className = 'text-sm muted';
+        info.textContent = `Page ${currentPage} of ${totalPages} (${totalItems} total items)`;
+        controls.appendChild(info);
+
+        const prevBtn = document.createElement('button');
+        prevBtn.className = 'btn ml-sm';
+        prevBtn.textContent = 'Previous';
+        prevBtn.disabled = currentPage <= 1;
+        prevBtn.onclick = () => loadQueue(currentPage - 1);
+        controls.appendChild(prevBtn);
+
+        const nextBtn = document.createElement('button');
+        nextBtn.className = 'btn ml-sm';
+        nextBtn.textContent = 'Next';
+        nextBtn.disabled = currentPage >= totalPages;
+        nextBtn.onclick = () => loadQueue(currentPage + 1);
+        controls.appendChild(nextBtn);
       }
       async function syncNow() {
         await fetch('/sync-now', {method: 'POST'});
         setTimeout(loadStatus, 1000);
       }
+      async function resetErrors() {
+        const response = await fetch('/reset-errors', {method: 'POST'});
+        const result = await response.json();
+        if (result.reset) {
+          showToast(`✅ Reset errors: ${result.requeued_failed || 0} items requeued`);
+        }
+        loadQueue(currentQueuePage);
+      }
+
+      // Download control functions
+      let isPaused = false;
+      async function togglePauseResume() {
+        const btn = document.getElementById('pause_resume_btn');
+        try {
+          if (isPaused) {
+            await fetch('/resume-downloads', {method: 'POST'});
+            btn.textContent = '⏸️ Pause';
+            btn.classList.add('btn-primary');
+            btn.classList.remove('btn-danger');
+            isPaused = false;
+            showToast('▶️ Downloads resumed');
+          } else {
+            await fetch('/pause-downloads', {method: 'POST'});
+            btn.textContent = '▶️ Resume';
+            btn.classList.remove('btn-primary');
+            btn.classList.add('btn-danger');
+            isPaused = true;
+            showToast('⏸️ Downloads paused');
+          }
+        } catch (error) {
+          showToast('❌ Error toggling pause/resume');
+        }
+      }
+
+      async function loadDownloadStatus() {
+        try {
+          const response = await fetch('/download-status');
+          const status = await response.json();
+
+          // Update pause/resume button state
+          const btn = document.getElementById('pause_resume_btn');
+          if (status.paused !== isPaused) {
+            isPaused = status.paused;
+            if (isPaused) {
+              btn.textContent = '▶️ Resume';
+              btn.classList.remove('btn-primary');
+              btn.classList.add('btn-danger');
+            } else {
+              btn.textContent = '⏸️ Pause';
+              btn.classList.add('btn-primary');
+              btn.classList.remove('btn-danger');
+            }
+          }
+        } catch (error) {
+          console.log('Error loading download status:', error);
+        }
+      }
+
+      function showToast(message) {
+        // Remove existing toast
+        const existing = document.querySelector('.toast');
+        if (existing) existing.remove();
+
+        // Create new toast
+        const toast = document.createElement('div');
+        toast.className = 'toast';
+        toast.textContent = message;
+        document.body.appendChild(toast);
+
+        // Remove after 3 seconds
+        setTimeout(() => toast.remove(), 3000);
+      }
       function updateRedirectUri() {
-        document.getElementById('redirect_uri').textContent = window.location.origin + '/auth/callback';
+        const uri = window.location.origin + '/auth/callback';
+        const input = document.getElementById('redirect_uri');
+        if (input) input.value = uri;
+        const codeEl = document.getElementById('redirect_uri_text');
+        if (codeEl) codeEl.textContent = uri;
         const copyBtn = document.getElementById('copy_redirect');
-        if(copyBtn){ copyBtn.onclick = async ()=>{ try{ await navigator.clipboard.writeText(document.getElementById('redirect_uri').textContent); showSaved(); }catch(e){} } }
+        if(copyBtn){
+          copyBtn.onclick = async ()=>{
+            try{
+              await navigator.clipboard.writeText(uri);
+              showSaved();
+            }catch(e){
+              try{
+                input.select(); document.execCommand('copy'); showSaved();
+              }catch(_){ /* ignore */ }
+            }
+          };
+        }
       }
       async function updateSpotifyHelpVisibility() {
         try {
@@ -182,11 +599,11 @@
           const data = await r.json();
           const dismissed = localStorage.getItem('spotify_help_dismissed') === '1';
           const show = !data.authenticated && !dismissed;
-          document.getElementById('spotify_help').style.display = show ? 'block' : 'none';
+          document.getElementById('spotify_help').classList.toggle('hidden', !show);
         } catch (_) {
           // Fallback: show unless dismissed
           const dismissed = localStorage.getItem('spotify_help_dismissed') === '1';
-          document.getElementById('spotify_help').style.display = dismissed ? 'none' : 'block';
+          document.getElementById('spotify_help').classList.toggle('hidden', dismissed);
         }
       }
       function authClick() {
@@ -198,18 +615,39 @@
         }
         window.location.href = '/auth/login';
       }
-      // Sidebar open/close wiring
+      // Theme toggle
+      (function(){
+        const key = 'theme';
+        const btn = document.getElementById('theme_toggle');
+        const apply = (t)=>{ document.documentElement.setAttribute('data-theme', t); btn.textContent = t==='light' ? '☀️' : '🌙'; };
+        const initial = localStorage.getItem(key) || 'dark';
+        apply(initial);
+        btn.addEventListener('click', ()=>{ const next = (document.documentElement.getAttribute('data-theme')==='light') ? 'dark' : 'light'; localStorage.setItem(key, next); apply(next); });
+      })();
+
+      // Sidebar open/close wiring (class-only)
       const sidebar = document.getElementById('sidebar');
       const backdrop = document.getElementById('sidebar_backdrop');
-      function openSidebar(){ sidebar.style.display='block'; backdrop.style.display='block'; }
-      function closeSidebar(){ sidebar.style.display='none'; backdrop.style.display='none'; }
+      async function openSidebar(){
+        sidebar.classList.add('visible');
+        backdrop.classList.add('visible');
+        requestAnimationFrame(()=> sidebar.classList.add('open'));
+        // Auto-load playlists when settings opened if authenticated
+        try {
+          const st = await (await fetch('/app/state')).json();
+          if (st.authenticated && !document.getElementById('playlists_block').classList.contains('hidden')) {
+            await loadPlaylists();
+          }
+        } catch(e) {}
+      }
+      function closeSidebar(){ sidebar.classList.remove('open'); backdrop.classList.remove('visible'); setTimeout(()=>{ sidebar.classList.remove('visible'); }, 200); }
       document.getElementById('open_sidebar').addEventListener('click', openSidebar);
       document.getElementById('close_sidebar').addEventListener('click', closeSidebar);
       backdrop.addEventListener('click', closeSidebar);
       document.getElementById('auth_btn').addEventListener('click', authClick);
       document.getElementById('spotify_help_close').addEventListener('click', () => {
         localStorage.setItem('spotify_help_dismissed', '1');
-        document.getElementById('spotify_help').style.display = 'none';
+        document.getElementById('spotify_help').classList.add('hidden');
       });
       document.getElementById('save').addEventListener('click', saveConfig);
       document.getElementById('sync').addEventListener('click', syncNow);
@@ -220,13 +658,14 @@
         const vs = document.getElementById('tab_status');
         const vq = document.getElementById('tab_queue');
         if(name==='status'){
-          vs.style.display='block'; vq.style.display='none';
-          bs.style.borderBottom='2px solid #111'; bq.style.borderBottom='2px solid transparent';
+          vs.classList.remove('hidden'); vq.classList.add('hidden');
+          bs.classList.add('active'); bq.classList.remove('active');
           bs.setAttribute('aria-selected','true'); bq.setAttribute('aria-selected','false');
           bs.setAttribute('tabindex','0'); bq.setAttribute('tabindex','-1');
+          loadCatalog(); // Load catalog when switching to status tab
         } else {
-          vs.style.display='none'; vq.style.display='block';
-          bq.style.borderBottom='2px solid #111'; bs.style.borderBottom='2px solid transparent';
+          vs.classList.add('hidden'); vq.classList.remove('hidden');
+          bq.classList.add('active'); bs.classList.remove('active');
           bq.setAttribute('aria-selected','true'); bs.setAttribute('aria-selected','false');
           bq.setAttribute('tabindex','0'); bs.setAttribute('tabindex','-1');
         }
@@ -243,18 +682,39 @@
       document.getElementById('tab_btn_queue').addEventListener('keydown', (e)=>{ if(e.key==='ArrowLeft'){ setActiveTab('status'); document.getElementById('tab_btn_status').focus(); }});
       async function loadPlaylists() {
         const r = await fetch('/playlists');
-        const pls = await r.json();
+        const data = await r.json();
+        if (!r.ok) {
+          const container = document.getElementById('playlists');
+          container.innerHTML = '';
+          const box = document.createElement('div');
+          box.className = 'help-card';
+          box.innerHTML = `<strong>Can’t load playlists.</strong><div class=\"muted small mt-sm\">${(data && data.error) || 'Unable to load playlists.'} <button id=\"retry_pl\" class=\"btn ml-sm\">Retry</button> <button id=\"go_auth\" class=\"btn ml-sm\">Open Settings</button></div>`;
+          container.appendChild(box);
+          const go = document.getElementById('go_auth');
+          if (go) go.addEventListener('click', ()=> document.getElementById('open_sidebar').click());
+          const rb = document.getElementById('retry_pl');
+          if (rb) rb.addEventListener('click', loadPlaylists);
+          document.getElementById('pl_count').textContent = '0 selected';
+          return;
+        }
+        const pls = Array.isArray(data) ? data : [];
         const container = document.getElementById('playlists');
         container.innerHTML = '';
         pls.forEach(p => {
-          const id = 'pl_' + p.id;
+          const base = 'pl_' + p.id;
           const row = document.createElement('div');
           row.className = 'row';
-          row.innerHTML = `<label><input type=\"checkbox\" id=\"${id}\" data-playlist-id=\"${p.id}\"> ${p.name} (${p.tracks})</label> <select id=\"${id}_strategy\">${["song-only","all-artist-songs","all-album-songs","all"].map(o=>`<option value=\\\"${o}\\\">${o}</option>`).join('')}</select>`;
+          row.innerHTML = `
+            <input type=\"hidden\" id=\"${base}\" data-playlist-id=\"${p.id}\"> 
+            <div class=\"muted\" style=\"margin-bottom:6px\"><strong>${p.name}</strong> <span class=\"text-sm\">(${p.tracks})</span></div>
+            <label class=\"ml-sm\"><input type=\"checkbox\" id=\"${base}_song\"> Song</label>
+            <label class=\"ml-sm\"><input type=\"checkbox\" id=\"${base}_artist\"> Artist</label>
+            <label class=\"ml-sm\"><input type=\"checkbox\" id=\"${base}_album\"> Album</label>
+          `;
           container.appendChild(row);
-          const song = document.getElementById(`${id}_song`);
-          const artist = document.getElementById(`${id}_artist`);
-          const album = document.getElementById(`${id}_album`);
+          const song = document.getElementById(`${base}_song`);
+          const artist = document.getElementById(`${base}_artist`);
+          const album = document.getElementById(`${base}_album`);
           song.checked = !!p.song; artist.checked = !!p.artist; album.checked = !!p.album;
           ;[song,artist,album].forEach(cb=> cb.addEventListener('change', updatePlCount));
         });
@@ -284,11 +744,13 @@
         if (!r.ok) {
           const msg = document.createElement('div');
           msg.textContent = 'Failed to save playlists';
-          msg.style.color = '#b00020';
+          msg.className = 'error-text';
           document.getElementById('playlists_block').appendChild(msg);
           setTimeout(()=>msg.remove(), 2000);
           return false;
         }
+        // Refresh to reflect selections
+        await loadPlaylists();
         return true;
       }
       document.getElementById('save_pl').addEventListener('click', async ()=>{const ok = await savePlaylists(); if(ok) showSaved();});
@@ -298,17 +760,23 @@
         const gated = document.getElementById('gated');
         const plb = document.getElementById('playlists_block');
         if(st.authenticated){
-          gated.style.display = 'block';
-          plb.style.display = 'block';
+          gated.classList.remove('hidden');
+          plb.classList.remove('hidden');
         } else {
-          gated.style.display = 'none';
-          plb.style.display = 'none';
+          gated.classList.add('hidden');
+          plb.classList.add('hidden');
         }
+        // Disable Sync when service not effectively usable
+        try {
+          const canSync = !!(st.configured && st.authenticated);
+          const btnSync = document.getElementById('sync');
+          if (btnSync) btnSync.disabled = !canSync;
+        } catch(_) {}
       }
       function showSaved(){
         const msg = document.createElement('div');
-        msg.textContent = 'Saved';
-        msg.style.position='fixed';msg.style.bottom='12px';msg.style.right='12px';msg.style.background='#e6ffed';msg.style.border='1px solid #b7eb8f';msg.style.padding='8px 12px';msg.style.borderRadius='6px';
+        msg.className = 'toast';
+        msg.textContent = 'Saved ✓';
         document.body.appendChild(msg); setTimeout(()=>msg.remove(), 1500);
       }
       async function init(){
@@ -316,18 +784,351 @@
         updateRedirectUri();
         await updateSpotifyHelpVisibility();
         setActiveTab('status');
+        // Show auth error guidance when redirected with error flag
+        try {
+          const params = new URLSearchParams(window.location.search);
+          if (params.get('auth_error') === '1') {
+            const msg = document.createElement('div');
+            msg.className = 'help-card';
+            msg.innerHTML = '<strong>Authentication failed.</strong><div class="muted small mt-sm">Check that your Spotify Redirect URI exactly matches the one shown here, and that the Client ID is correct. Then try Authenticate again.</div>';
+            document.getElementById('sidebar').prepend(msg);
+            openSidebar();
+          }
+        } catch(_) {}
         await gateViews();
-        if(document.getElementById('gated').style.display==='block'){
+        if(!document.getElementById('gated').classList.contains('hidden')){
           await loadPlaylists();
           await loadStatus();
           await loadQueue();
+          await loadCatalog(); // Load catalog on initial load
           setInterval(loadStatus, 3000);
-          setInterval(loadQueue, 3000);
+          setInterval(() => loadQueue(currentQueuePage, currentResultsPage), 3000);
         }
       }
+
+      // Catalog mode switching
+      let currentCatalogMode = 'songs';
+      function setCatalogMode(mode) {
+        currentCatalogMode = mode;
+        const buttons = ['catalog_songs', 'catalog_artists', 'catalog_albums'];
+        buttons.forEach(id => {
+          const btn = document.getElementById(id);
+          btn.classList.toggle('active', id === `catalog_${mode}`);
+        });
+        loadCatalog();
+      }
+      document.getElementById('catalog_songs').addEventListener('click', () => setCatalogMode('songs'));
+      document.getElementById('catalog_artists').addEventListener('click', () => setCatalogMode('artists'));
+      document.getElementById('catalog_albums').addEventListener('click', () => setCatalogMode('albums'));
+
+      // Store unfiltered catalog data
+      let catalogData = [];
+      let queueData = {};
+
+      // Add filtering functionality
+      function filterCatalogItems(items, searchTerm, statusFilter) {
+        return items.filter(item => {
+          // Search filter
+          if (searchTerm) {
+            const search = searchTerm.toLowerCase();
+            const name = (item.name || '').toLowerCase();
+            const artist = (item.artist || '').toLowerCase();
+            const album = (item.album || '').toLowerCase();
+            if (!name.includes(search) && !artist.includes(search) && !album.includes(search)) {
+              return false;
+            }
+          }
+
+          // Status filter
+          if (statusFilter && statusFilter !== item.status) {
+            return false;
+          }
+
+          return true;
+        });
+      }
+
+      function filterQueueItems(items, searchTerm) {
+        return items.filter(item => {
+          if (searchTerm) {
+            const search = searchTerm.toLowerCase();
+            const artist = (item.artist || '').toLowerCase();
+            const title = (item.title || '').toLowerCase();
+            const album = (item.album || '').toLowerCase();
+            if (!artist.includes(search) && !title.includes(search) && !album.includes(search)) {
+              return false;
+            }
+          }
+          return true;
+        });
+      }
+
+      function applyCatalogFilters() {
+        const searchTerm = document.getElementById('catalog_search').value;
+        const statusFilter = document.getElementById('catalog_status_filter').value;
+        const filteredItems = filterCatalogItems(catalogData, searchTerm, statusFilter);
+        renderCatalogGrid(filteredItems);
+      }
+
+      function applyQueueFilters() {
+        const searchTerm = document.getElementById('queue_search').value;
+        if (!queueData || !queueData.current && !queueData.pending && !queueData.completed) {
+          return;
+        }
+
+        const tbody = document.getElementById('q_table');
+        tbody.innerHTML = '';
+        const push = (song, html) => {
+          const tr = document.createElement('tr');
+          const a = document.createElement('td');
+          const b = document.createElement('td');
+          a.textContent = song;
+          b.innerHTML = html;
+          tr.appendChild(a);
+          tr.appendChild(b);
+          tbody.appendChild(tr);
+        };
+
+        // Filter and display each section
+        const filteredCurrent = filterQueueItems(queueData.current || [], searchTerm);
+        const filteredPending = filterQueueItems(queueData.pending || [], searchTerm);
+        const filteredCompleted = filterQueueItems((queueData.completed || []).filter(x => x.status !== 'downloaded'), searchTerm);
+
+        filteredCurrent.forEach(x => push(`${x.artist || 'unknown'} - ${x.title || ''}`, `<div class="progress" aria-label="Downloading"><span style="width:${x.progress || 0}%" aria-hidden="true"></span></div>`));
+        filteredPending.forEach(x => push(`${x.artist || 'unknown'} - ${x.title || ''}`, '<span class="status-badge"><span class="status-icon" aria-hidden="true">⏳</span><span>Queued</span></span>'));
+        filteredCompleted.forEach(x => push(`${x.artist || 'unknown'} - ${x.title || ''}`, '<span class="status-badge err"><span class="status-icon" aria-hidden="true">!</span><span>Error</span></span>'));
+      }
+
+      // Debounce function for search inputs
+      function debounce(func, wait) {
+        let timeout;
+        return function executedFunction(...args) {
+          const later = () => {
+            clearTimeout(timeout);
+            func(...args);
+          };
+          clearTimeout(timeout);
+          timeout = setTimeout(later, wait);
+        };
+      }
+
+      // Create debounced filter functions
+      const debouncedCatalogFilter = debounce(applyCatalogFilters, 300);
+      const debouncedQueueFilter = debounce(applyQueueFilters, 300);
+
+      // Add event listeners for filtering
+      document.getElementById('catalog_search').addEventListener('input', debouncedCatalogFilter);
+      document.getElementById('catalog_status_filter').addEventListener('change', applyCatalogFilters); // No debounce for dropdown
+      document.getElementById('queue_search').addEventListener('input', debouncedQueueFilter);
+
+      let loadingAnimationInterval = null;
+
+      async function loadCatalog() {
+        const grid = document.getElementById('catalog_grid');
+
+        try {
+          // Fast cache-based loading - no animation needed
+          const response = await fetch(`/catalog/${currentCatalogMode}`);
+          const data = await response.json();
+
+          if (!response.ok) {
+            grid.innerHTML = `<div class="help-card">Error loading catalog: ${data.error || 'Unknown error'}</div>`;
+            return;
+          }
+
+          // Store unfiltered data
+          catalogData = data.items || [];
+
+          // Apply current filters
+          applyCatalogFilters();
+        } catch (error) {
+          grid.innerHTML = `<div class="help-card">Failed to load catalog: ${error.message}</div>`;
+        }
+      }
+
+      function startLoadingAnimation(element) {
+        const frames = ['▘', '▀', '▝', '▐', '▗', '▄', '▖', '▌'];
+        let frameIndex = 0;
+
+        element.innerHTML = `<div class="help-card loading-animation">Loading ${currentCatalogMode}... <span id="loading-spinner">▘</span></div>`;
+
+        loadingAnimationInterval = setInterval(() => {
+          const spinner = document.getElementById('loading-spinner');
+          if (spinner) {
+            spinner.textContent = frames[frameIndex];
+            frameIndex = (frameIndex + 1) % frames.length;
+          }
+        }, 250);
+      }
+
+      function stopLoadingAnimation() {
+        if (loadingAnimationInterval) {
+          clearInterval(loadingAnimationInterval);
+          loadingAnimationInterval = null;
+        }
+      }
+
+      function renderCatalogGrid(items) {
+        const grid = document.getElementById('catalog_grid');
+        if (items.length === 0) {
+          grid.innerHTML = '<div class="help-card">No items found</div>';
+          return;
+        }
+        grid.innerHTML = items.map(item => `
+          <div class="catalog-item status-${item.status || 'unknown'}" data-item-id="${item.id}" data-item-type="${currentCatalogMode}" onclick="toggleItemDetails('${currentCatalogMode}', '${item.id}')">
+            <div class="catalog-status-badge">${getStatusBadge(item.status)}</div>
+            <div class="catalog-image">
+              ${item.image ? `<img src="${item.image}" alt="${item.name}" loading="lazy">` : '<div class="placeholder-image">♪</div>'}
+            </div>
+            <div class="catalog-title">${item.name}</div>
+            ${item.artist ? `<div class="catalog-subtitle">${item.artist}</div>` : ''}
+            <div class="catalog-metadata ${item.duration ? '' : 'loading'}" id="metadata_${item.id}">
+              ${item.duration ? `<div class="metadata-summary">${formatDuration(item.duration)} • ${item.status || 'Unknown'}</div>` : '<div class="metadata-spinner">Loading...</div>'}
+            </div>
+            <div class="catalog-details hidden" id="details_${item.id}">
+              <div class="details-content"></div>
+            </div>
+          </div>
+        `).join('');
+
+        // Start background metadata loading for all items
+        startBackgroundMetadataLoading();
+      }
+
+      // Background metadata streaming system
+      const metadataCache = new Map();
+      const metadataQueue = [];
+      const priorityQueue = [];
+      let isProcessingMetadata = false;
+
+      function toggleItemDetails(type, id) {
+        const detailsEl = document.getElementById(`details_${id}`);
+        const metadataEl = document.getElementById(`metadata_${id}`);
+
+        if (detailsEl.classList.contains('hidden')) {
+          // Expanding - prioritize this item's metadata
+          prioritizeMetadata(type, id);
+          detailsEl.classList.remove('hidden');
+
+          // Show existing data immediately if cached
+          if (metadataCache.has(id)) {
+            populateItemDetails(id, metadataCache.get(id));
+            metadataEl.classList.remove('loading');
+          }
+        } else {
+          // Collapsing
+          detailsEl.classList.add('hidden');
+        }
+      }
+
+      function prioritizeMetadata(type, id) {
+        // Remove from regular queue if present
+        const queueIndex = metadataQueue.findIndex(item => item.id === id);
+        if (queueIndex !== -1) {
+          metadataQueue.splice(queueIndex, 1);
+        }
+
+        // Add to priority queue if not already cached
+        if (!metadataCache.has(id) && !priorityQueue.find(item => item.id === id)) {
+          priorityQueue.unshift({ type, id, priority: true });
+          processMetadataQueue();
+        }
+      }
+
+      async function processMetadataQueue() {
+        if (isProcessingMetadata) return;
+        isProcessingMetadata = true;
+
+        while (priorityQueue.length > 0 || metadataQueue.length > 0) {
+          // Process priority queue first
+          const item = priorityQueue.shift() || metadataQueue.shift();
+
+          if (!metadataCache.has(item.id)) {
+            try {
+              const response = await fetch(`/catalog/${item.type}/${item.id}`);
+              const data = await response.json();
+
+              if (response.ok) {
+                metadataCache.set(item.id, data);
+                populateItemDetails(item.id, data);
+
+                // Update the metadata loading state
+                const metadataEl = document.getElementById(`metadata_${item.id}`);
+                if (metadataEl) {
+                  metadataEl.classList.remove('loading');
+                  metadataEl.innerHTML = `<div class="metadata-summary">${formatDuration(data.duration)} • ${data.status || 'Ready'}</div>`;
+                }
+              }
+            } catch (error) {
+              console.warn(`Failed to load metadata for ${item.id}:`, error);
+            }
+          }
+
+          // Small delay to prevent overwhelming the server
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        isProcessingMetadata = false;
+      }
+
+      function populateItemDetails(id, data) {
+        const detailsEl = document.getElementById(`details_${id}`);
+        if (!detailsEl) return;
+
+        const metaItems = [];
+        if (data.duration) metaItems.push(`Duration: ${formatDuration(data.duration)}`);
+        if (data.url) metaItems.push(`<a href="${data.url}" target="_blank" rel="noopener">View on YouTube</a>`);
+        if (data.status) metaItems.push(`Status: ${data.status}`);
+        if (data.song_count) metaItems.push(`Songs: ${data.song_count}`);
+
+        detailsEl.querySelector('.details-content').innerHTML = `
+          <div class="item-metadata">${metaItems.join(' • ')}</div>
+          ${data.related && data.related.length > 0 ? `
+            <div class="related-items">
+              <strong>Related:</strong>
+              ${data.related.slice(0, 3).map(item => `<span class="related-tag">${item.name}</span>`).join('')}
+            </div>
+          ` : ''}
+        `;
+      }
+
+      function startBackgroundMetadataLoading() {
+        // Queue all visible items for background loading
+        const catalogItems = document.querySelectorAll('.catalog-item');
+        catalogItems.forEach(item => {
+          const id = item.dataset.itemId;
+          const type = item.dataset.itemType;
+
+          if (id && type && !metadataCache.has(id)) {
+            metadataQueue.push({ type, id, priority: false });
+          }
+        });
+
+        // Start processing with a small delay
+        setTimeout(() => processMetadataQueue(), 500);
+      }
+
+      function formatDuration(seconds) {
+        if (!seconds) return 'Unknown';
+        const minutes = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${minutes}:${secs.toString().padStart(2, '0')}`;
+      }
+
+      function getStatusBadge(status) {
+        const badges = {
+          'missing': '❌',
+          'queued': '⏳',
+          'downloading': '⬇️',
+          'downloaded': '✅',
+          'unknown': '❓'
+        };
+        return badges[status] || badges.unknown;
+      }
+
       init();
     </script>
-    <footer style="margin-top:24px;color:#555;font-size:0.9em;">
+    <footer class="muted mt-lg text-sm">
       Disclaimer: Using YouTube Music with yt‑dl/yt‑dlp may violate YouTube’s Terms of Service. Use only for content you own or have rights to. You are solely responsible for how you use this software.
     </footer>
   </body>

@@ -13,6 +13,7 @@ def load_config(db) -> Dict:
         'spotify_client_id': db.get_setting('spotify_client_id') or '',
         'path_template': db.get_setting('path_template') or '{artist}/{album}/{artist} - {title}.{ext}',
         'yt_cookie': db.get_setting('yt_cookie') or '',
+        'use_strict_matching': db.get_setting('use_strict_matching') == 'true',
     }
 
 
@@ -27,3 +28,5 @@ def save_config(db, cfg: Dict):
         db.set_setting('path_template', cfg.get('path_template') or '{artist}/{album}/{artist} - {title}.{ext}')
     if 'yt_cookie' in cfg:
         db.set_setting('yt_cookie', cfg.get('yt_cookie') or '')
+    if 'use_strict_matching' in cfg:
+        db.set_setting('use_strict_matching', 'true' if cfg.get('use_strict_matching') else 'false')

@@ -16,12 +16,79 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
 
     @app.get('/status')
     def status():
-        return get_status(), 200
+        st = get_status()
+        # Normalize headline counters from durable sources
+        try:
+            # Derive missing/downloading from the queue snapshot (persistent)
+            q = (st or {}).get('queue', {}) or {}
+            current = q.get('current', []) or []
+            completed = q.get('completed', []) or []
+            st['downloading'] = len(current)
+            st['missing'] = len([x for x in completed if x.get('status') == 'missing'])
+
+            # Derive downloaded from filesystem (source of truth)
+            downloaded_files = 0
+            if db:
+                from .config import load_config
+                from .utils.download_counter import count_files
+                cfg = load_config(db)
+                host = (cfg.get('host_path') or '').strip()
+                fmt = (cfg.get('format') or 'mp3').lower()
+                downloaded_files = count_files(host, fmt, ttl_seconds=10)
+            st['downloaded'] = int(downloaded_files)
+        except Exception:
+            # Best-effort normalization; never fail the endpoint
+            pass
+        # Surface scheduler info if available
+        try:
+            if service and hasattr(service, 'get_schedule'):
+                st['schedule'] = service.get_schedule()
+        except Exception:
+            pass
+        return st, 200
 
     @app.get('/queue')
     def queue_view():
-        st = get_status()
-        return jsonify(st.get('queue', {})), 200
+        # Use lightweight status tracking (deadlock-free)
+        if service:
+            queue_data = service.get_live_queue_status()
+        else:
+            # Fallback to traditional status if no service
+            st = get_status()
+            queue_data = st.get('queue', {})
+
+        # Add pagination support
+        page = int(request.args.get('page', 1))
+        page_size = int(request.args.get('page_size', 100))
+
+        def paginate_list(items, page_num, size):
+            start = (page_num - 1) * size
+            end = start + size
+            return items[start:end]
+
+        # Paginate each queue section
+        paginated_queue = {}
+        for key in ['pending', 'current', 'completed']:
+            items = queue_data.get(key, [])
+            paginated_queue[key] = paginate_list(items, page, page_size)
+            paginated_queue[f'{key}_total'] = len(items)
+
+        # Success/failure breakdown of completed
+        try:
+            completed_items = queue_data.get('completed', []) or []
+            paginated_queue['completed_success_total'] = len([x for x in completed_items if x.get('status') == 'downloaded'])
+            paginated_queue['completed_failed_total'] = len([x for x in completed_items if x.get('status') == 'missing'])
+        except Exception:
+            paginated_queue['completed_success_total'] = 0
+            paginated_queue['completed_failed_total'] = 0
+
+        paginated_queue['page'] = page
+        paginated_queue['page_size'] = page_size
+        total_items = sum(len(queue_data.get(k, [])) for k in ['pending', 'current', 'completed'])
+        paginated_queue['total_pages'] = (total_items + page_size - 1) // page_size
+        paginated_queue['total_items'] = total_items
+
+        return jsonify(paginated_queue), 200
 
     @app.get('/app/state')
     def app_state():
@@ -44,6 +111,101 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
             return jsonify({"started": False, "reason": "service not configured"}), 200
         ok = service.sync_now()
         return jsonify({"started": ok}), 200
+
+    @app.post('/reset-errors')
+    def reset_errors():
+        if not db:
+            return jsonify({"reset": False, "reason": "db not configured"}), 200
+        try:
+            # Clear the retry schedule to reset timeout timers
+            db.set_setting('retry_schedule', '{}')
+
+            # Reset failed items tracking in sync service
+            if service:
+                service._failed_items.clear()
+
+            # Move failed items back to pending queue and reset error counts
+            from .status import reset_false_completions, set_status, get_status
+            failed_count, success_count = reset_false_completions()
+
+            # Reset error counts in status
+            status = get_status()
+            status['missing'] = 0  # Reset error count
+            status['downloading'] = 0  # Reset downloading count
+            set_status(status)
+
+            return jsonify({
+                "reset": True,
+                "requeued_failed": failed_count,
+                "kept_successful": success_count
+            }), 200
+        except Exception as e:
+            return jsonify({"reset": False, "reason": f"error: {str(e)}"}), 500
+
+    @app.post('/pause-downloads')
+    def pause_downloads():
+        if not service:
+            return jsonify({"paused": False, "reason": "service not configured"}), 200
+        try:
+            service.pause_downloads()
+            return jsonify({"paused": True}), 200
+        except Exception as e:
+            return jsonify({"paused": False, "reason": f"error: {str(e)}"}), 500
+
+    @app.post('/resume-downloads')
+    def resume_downloads():
+        if not service:
+            return jsonify({"resumed": False, "reason": "service not configured"}), 200
+        try:
+            service.resume_downloads()
+            return jsonify({"resumed": True}), 200
+        except Exception as e:
+            return jsonify({"resumed": False, "reason": f"error: {str(e)}"}), 500
+
+    @app.get('/download-status')
+    def download_status():
+        if not service:
+            return jsonify({"status": "service not configured"}), 200
+        try:
+            status = service.get_download_status()
+            return jsonify(status), 200
+        except Exception as e:
+            return jsonify({"status": "error", "reason": str(e)}), 500
+
+    @app.post('/reset-queue')
+    def reset_queue():
+        """Reset stale queue items that are stuck in 'current' status"""
+        try:
+            from .status import get_status, set_status
+            status = get_status()
+            queue_data = status.get('queue', {})
+
+            # Move all current items to completed as "missing" (since they're stale)
+            current_items = queue_data.get('current', [])
+            completed_items = queue_data.get('completed', [])
+
+            # Mark current items as failed/missing and move to completed
+            for item in current_items:
+                item_copy = dict(item)
+                item_copy['status'] = 'missing'
+                item_copy['timestamp'] = __import__('datetime').datetime.utcnow().isoformat() + 'Z'
+                completed_items.insert(0, item_copy)
+
+            # Update status with cleared current queue
+            updated_status = dict(status)
+            updated_status['queue']['current'] = []
+            updated_status['queue']['completed'] = completed_items
+
+            set_status(updated_status)
+
+            return jsonify({
+                "reset": True,
+                "moved_to_completed": len(current_items),
+                "message": f"Moved {len(current_items)} stale items from current to completed"
+            }), 200
+
+        except Exception as e:
+            return jsonify({"reset": False, "reason": f"error: {str(e)}"}), 500
 
     @app.get('/auth/status')
     def auth_status():
@@ -75,7 +237,6 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
         host_path = data.get('host_path') or ''
         bitrate = int(data.get('bitrate', 128))
         fmt = (data.get('format') or 'mp3').lower()
-        concurrency = int(data.get('concurrency', 3))
         client_id = (data.get('spotify_client_id') or '').strip()
         path_template = (data.get('path_template') or '{artist}/{album}/{artist} - {title}.{ext}').strip()
         # Validation per spec
@@ -91,28 +252,355 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
             validate_user_template(path_template)
         except Exception as e:
             return jsonify({"error": f"invalid path_template: {e}"}), 400
-        if not (1 <= concurrency <= 10):
-            return jsonify({"error": "invalid concurrency"}), 400
         cfg = {
             'host_path': host_path,
             'bitrate': bitrate,
             'format': fmt,
-            'concurrency': concurrency,
             'spotify_client_id': client_id,
             'path_template': path_template,
+            'yt_cookie': (data.get('yt_cookie') or '').strip(),
+            'use_strict_matching': bool(data.get('use_strict_matching', False)),
         }
         save_config(db, cfg)
         # Auto-start scheduler if configured and service provided
         try:
             if service and _config_ready(db):
-                service.concurrency_cap = concurrency
+                # Kick off a scheduler and an immediate sync so users don't need to click
                 service.start_scheduler(interval_seconds=900)
+                try:
+                    service.sync_now()
+                except Exception:
+                    pass
         except Exception:
             pass
         return jsonify({"saved": True}), 200
+
+    # Catalog cache - populated on startup and during sync
+    catalog_cache = {
+        'songs': [],
+        'artists': [],
+        'albums': [],
+        'last_updated': None
+    }
+
+    def refresh_catalog_cache():
+        """Background task to refresh all catalog data"""
+        print("Starting catalog cache refresh...")
+        if not db:
+            print("No database available for cache refresh")
+            return
+
+        try:
+            # Get all tracked items
+            songs = _get_tracked_songs(db)
+            artists = _get_tracked_artists(db)
+            albums = _get_tracked_albums(db)
+            print(f"Retrieved data: {len(songs)} songs, {len(artists)} artists, {len(albums)} albums")
+
+            # Enhanced catalog with cached metadata
+            enhanced_songs = _enhance_songs_with_metadata(songs, db)
+            enhanced_artists = artists  # Use all artists
+            enhanced_albums = albums  # Use all albums
+
+            # Update cache atomically
+            import time
+            catalog_cache.update({
+                'songs': enhanced_songs,
+                'artists': enhanced_artists,
+                'albums': enhanced_albums,
+                'last_updated': time.time()
+            })
+            print(f"Cache updated with {len(enhanced_songs)} songs, {len(enhanced_artists)} artists, {len(enhanced_albums)} albums")
+
+        except Exception as e:
+            # Log error but don't crash
+            import traceback
+            print(f"Error refreshing catalog cache: {e}")
+            print("Traceback:")
+            traceback.print_exc()
+
+    # Catalog endpoints - now serve from cache
+    @app.get('/catalog/<mode>')
+    def get_catalog(mode):
+        if mode not in ['songs', 'artists', 'albums']:
+            return jsonify({"error": "Invalid catalog mode"}), 400
+
+        # Serve from cache instantly
+        return jsonify({"items": catalog_cache.get(mode, [])}), 200
+
+    @app.get('/catalog/<mode>/<item_id>')
+    def get_catalog_item(mode, item_id):
+        if mode not in ['songs', 'artists', 'albums']:
+            return jsonify({"error": "Invalid catalog mode"}), 400
+
+        if not db:
+            return jsonify({"error": "Database not configured"}), 500
+
+        try:
+            from .youtube_client import YouTubeMusicClient
+            yt = YouTubeMusicClient()
+
+            # Find the item in our catalog
+            items = []
+            if mode == 'songs':
+                items = _get_tracked_songs(db)
+            elif mode == 'artists':
+                items = _get_tracked_artists(db)
+            elif mode == 'albums':
+                items = _get_tracked_albums(db)
+
+            # Find the specific item
+            item = None
+            for i in items:
+                if i['id'] == item_id:
+                    item = i
+                    break
+
+            if not item:
+                return jsonify({"error": "Item not found"}), 404
+
+            # Get enhanced metadata
+            enhanced_data = _fetch_ytm_metadata(yt, mode, item, db)
+            if not enhanced_data:
+                return jsonify({"error": "Failed to fetch metadata"}), 500
+
+            # Add related items based on mode
+            related = []
+            if mode == 'songs':
+                # For songs, show other songs by the same artist
+                artist_songs = [s for s in _get_tracked_songs(db) if s['artist'] == item['artist'] and s['id'] != item_id]
+                for song in artist_songs[:6]:  # Limit to 6 related items
+                    related.append({
+                        'id': song['id'],
+                        'name': song['name'],
+                        'type': 'songs',
+                        'image': None
+                    })
+            elif mode == 'artists':
+                # For artists, show their songs
+                artist_songs = [s for s in _get_tracked_songs(db) if s['artist'] == item['name']]
+                for song in artist_songs[:6]:
+                    related.append({
+                        'id': song['id'],
+                        'name': song['name'],
+                        'type': 'songs',
+                        'image': None
+                    })
+
+            enhanced_data['related'] = related
+            return jsonify(enhanced_data), 200
+
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    def _get_tracked_songs(db_inst):
+        # Get songs from download queue and status
+        from .status import get_status
+        status = get_status()
+        songs = []
+
+        # Add from queue - extract from the actual item structure
+        queue_data = status.get('queue', {})
+        for section in ['pending', 'current', 'completed']:
+            for item in queue_data.get(section, []):
+                # Extract title, artist, album from the item directly
+                title = item.get('title', 'Unknown')
+                artist = item.get('artist', 'Unknown')
+                album = item.get('album', '')
+                duration = item.get('duration', 0)
+                download_status = item.get('status', 'unknown')
+
+                # Map download status to display status
+                if section == 'pending':
+                    display_status = 'queued'
+                elif section == 'current':
+                    display_status = 'downloading'
+                elif section == 'completed':
+                    if download_status == 'downloaded':
+                        display_status = 'downloaded'
+                    else:
+                        display_status = 'missing'  # failed downloads
+                else:
+                    display_status = download_status
+
+                songs.append({
+                    'id': f"song_{hash(f'{artist}|{title}') % 100000}",
+                    'name': title,
+                    'artist': artist,
+                    'album': album,
+                    'duration': duration,
+                    'status': display_status
+                })
+
+        # Deduplicate by name+artist
+        seen = set()
+        unique_songs = []
+        for song in songs:
+            key = f"{song['name']}|{song['artist']}"
+            if key not in seen:
+                seen.add(key)
+                unique_songs.append(song)
+
+        return unique_songs
+
+    def _get_tracked_artists(db_inst):
+        # Get unique artists from tracked songs
+        songs = _get_tracked_songs(db_inst)
+        artists = {}
+        for song in songs:
+            artist_name = song['artist']
+            if artist_name != 'Unknown' and artist_name not in artists:
+                artists[artist_name] = {
+                    'id': f"artist_{hash(artist_name) % 10000}",
+                    'name': artist_name
+                }
+        return list(artists.values())
+
+    def _get_tracked_albums(db_inst):
+        # Extract unique albums from tracked songs
+        songs = _get_tracked_songs(db_inst)
+        albums = {}
+        for song in songs:
+            album_name = song.get('album', '').strip()
+            artist_name = song.get('artist', 'Unknown')
+            if album_name and album_name != 'Unknown' and album_name not in albums:
+                albums[album_name] = {
+                    'id': f"album_{hash(f'{artist_name}|{album_name}') % 10000}",
+                    'name': album_name,
+                    'artist': artist_name
+                }
+        return list(albums.values())
+
+    def _fetch_ytm_metadata(yt_client, mode, item, db_inst=None):
+        if mode == 'songs':
+            # Search for the song to get YTM metadata
+            track = {'artist': item['artist'], 'title': item['name']}
+            results = yt_client.search_song(track)
+            if results:
+                result = results[0]
+                return {
+                    'id': item['id'],
+                    'name': item['name'],
+                    'artist': item['artist'],
+                    'image': result.get('thumbnail'),  # Extract thumbnail from YTM search
+                    'url': result.get('url', ''),
+                    'duration': result.get('duration', 0),
+                    'status': item.get('status', 'unknown')
+                }
+        elif mode == 'artists':
+            # For artists, we could search for their top songs, but for now just return basic info
+            return {
+                'id': item['id'],
+                'name': item['name'],
+                'image': None,
+                'song_count': 0  # Could be enhanced with actual count
+            }
+        elif mode == 'albums':
+            # For albums, return basic info with track count
+            songs = _get_tracked_songs(db_inst) if hasattr(db_inst, 'get_setting') else []
+            track_count = len([s for s in songs if s.get('album') == item['name']])
+            return {
+                'id': item['id'],
+                'name': item['name'],
+                'artist': item.get('artist', 'Unknown'),
+                'image': None,  # Could be enhanced with album art search
+                'track_count': track_count
+            }
+
+        return None
+
+    def _enhance_songs_with_metadata(songs, db_inst):
+        """Enhance songs with cached metadata, fetching new metadata for uncached songs"""
+        if not db_inst:
+            return songs
+
+        enhanced_songs = []
+        songs_to_fetch = []
+
+        # Check cache for each song
+        for song in songs:
+            cache_key = f"metadata_{song['id']}"
+            cached_data = db_inst.get_setting(cache_key)
+
+            if cached_data:
+                try:
+                    import json
+                    metadata = json.loads(cached_data)
+                    # Use cached metadata
+                    enhanced_song = dict(song)
+                    enhanced_song['image'] = metadata.get('image')
+                    enhanced_songs.append(enhanced_song)
+                except Exception:
+                    # Invalid cache, add to fetch list
+                    songs_to_fetch.append(song)
+                    enhanced_songs.append(song)
+            else:
+                # No cache, add to fetch list
+                songs_to_fetch.append(song)
+                enhanced_songs.append(song)
+
+        # Fetch metadata for uncached songs (limit to avoid API overwhelm)
+        if songs_to_fetch:
+            print(f"Fetching metadata for {len(songs_to_fetch)} uncached songs (limiting to first 50)")
+            try:
+                from .youtube_client import YouTubeMusicClient
+                yt = YouTubeMusicClient()
+
+                # Limit to first 50 songs to avoid overwhelming the API
+                for song in songs_to_fetch[:50]:
+                    try:
+                        # Search for the song
+                        track = {'artist': song['artist'], 'title': song['name']}
+                        results = yt.search_song(track)
+
+                        if results:
+                            result = results[0]  # Take first match
+                            metadata = {
+                                'image': result.get('thumbnail'),
+                                'url': result.get('url', ''),
+                                'duration': result.get('duration', 0)
+                            }
+
+                            # Cache the metadata
+                            cache_key = f"metadata_{song['id']}"
+                            import json
+                            db_inst.set_setting(cache_key, json.dumps(metadata))
+
+                            # Update the enhanced song
+                            for i, enhanced_song in enumerate(enhanced_songs):
+                                if enhanced_song['id'] == song['id']:
+                                    enhanced_songs[i]['image'] = metadata['image']
+                                    break
+                    except Exception as e:
+                        print(f"Failed to fetch metadata for {song['name']}: {e}")
+
+            except Exception as e:
+                print(f"Error initializing YouTube client for metadata: {e}")
+
+        return enhanced_songs
+
+    # Initialize catalog cache on startup
+    print(f"Debug: db={db}, service={service}")
+    if db and service:
+        print("Starting background catalog cache refresh...")
+        import threading
+        def startup_cache_refresh():
+            import time
+            time.sleep(2)  # Let service initialize first
+            refresh_catalog_cache()
+
+        # Start cache refresh in background thread
+        cache_thread = threading.Thread(target=startup_cache_refresh, daemon=True)
+        cache_thread.start()
+    else:
+        print("Not starting cache refresh: db or service is None")
 
     # Attach web UI if DB provided
     if db:
         from .web import init_web  # lazy import
         init_web(app, db, service)
+
+    # Make cache refresh function available to service
+    app.refresh_catalog_cache = refresh_catalog_cache
+
     return app

@@ -2,6 +2,8 @@ import base64
 import hashlib
 import os
 import secrets
+import threading
+import time
 from urllib.parse import urlencode
 from typing import List, Dict, Optional
 
@@ -21,6 +23,8 @@ class SpotifyClient:
         self.db = db
         self.token_store = TokenStore(db)
         self.logger = get_logger(__name__)
+        self._refresh_lock = threading.Lock()
+        self._last_refresh_time = 0
 
     def _client_id(self) -> str:
         # Prefer configured client_id, else env, else empty (requires user to set)
@@ -67,12 +71,19 @@ class SpotifyClient:
             "client_id": client_id,
             "code_verifier": verifier,
         }
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
         log, cid = with_context(self.logger, attempt=1)
-        resp = requests.post(TOKEN_URL, data=data, timeout=15)
+        resp = requests.post(TOKEN_URL, data=data, headers=headers, timeout=15)
         try:
             resp.raise_for_status()
         except Exception as e:
-            log.error(f"spotify token exchange failed: {e}")
+            # Include response body to diagnose (e.g., invalid_grant, redirect_uri_mismatch)
+            try:
+                log.error(f"spotify token exchange failed: {e}; status={resp.status_code}; body={resp.text}")
+            except Exception:
+                log.error(f"spotify token exchange failed: {e}")
             raise
         token_info = resp.json()
         access_token = token_info.get("access_token")
@@ -85,28 +96,55 @@ class SpotifyClient:
         self.db.set_setting('spotify_pkce_state', '')
 
     def refresh_access_token(self, client_id: Optional[str] = None) -> str:
-        client_id = client_id or self._client_id()
-        at, rt = self.token_store.load()
-        if not rt:
-            raise RuntimeError("not_authenticated")
-        data = {
-            "grant_type": "refresh_token",
-            "refresh_token": rt,
-            "client_id": client_id,
-        }
-        log, cid = with_context(self.logger, attempt=1)
-        resp = requests.post(TOKEN_URL, data=data, timeout=15)
-        try:
-            resp.raise_for_status()
-        except Exception as e:
-            log.error(f"spotify refresh failed: {e}")
-            raise
-        token_info = resp.json()
-        access_token = token_info.get("access_token")
-        if access_token:
-            self.token_store.save(access_token, token_info.get("refresh_token", rt))
-            return access_token
-        raise RuntimeError("refresh_failed")
+        with self._refresh_lock:
+            # Check if another thread just refreshed the token
+            current_time = time.time()
+            if current_time - self._last_refresh_time < 5:  # 5 second cooldown
+                at, _ = self.token_store.load()
+                if at:
+                    return at
+
+            client_id = client_id or self._client_id()
+            at, rt = self.token_store.load()
+            if not rt:
+                raise RuntimeError("not_authenticated")
+            data = {
+                "grant_type": "refresh_token",
+                "refresh_token": rt,
+                "client_id": client_id,
+            }
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
+            log, cid = with_context(self.logger, attempt=1)
+            resp = requests.post(TOKEN_URL, data=data, headers=headers, timeout=15)
+
+            # Handle all HTTP errors and convert to RuntimeError for consistent handling
+            if not resp.ok:
+                try:
+                    log.error(f"spotify refresh failed: {resp.status_code}; body={resp.text}")
+                    # Check if refresh token was revoked
+                    if resp.status_code == 400:
+                        try:
+                            error_data = resp.json()
+                            if error_data.get("error") == "invalid_grant":
+                                log.info("refresh token revoked, clearing stored tokens")
+                                self.token_store.clear()
+                                raise RuntimeError("refresh_token_revoked")
+                        except (ValueError, KeyError):
+                            pass
+                except Exception:
+                    log.error(f"spotify refresh failed: HTTP {resp.status_code}")
+
+                # Convert any HTTP error to RuntimeError for consistent handling
+                raise RuntimeError(f"spotify_refresh_failed_http_{resp.status_code}")
+            token_info = resp.json()
+            access_token = token_info.get("access_token")
+            if access_token:
+                self.token_store.save(access_token, token_info.get("refresh_token", rt))
+                self._last_refresh_time = current_time
+                return access_token
+            raise RuntimeError("refresh_failed")
 
     # Data fetching methods remain same signature used by SyncService
     def current_user_playlists(self) -> List[Dict]:
@@ -123,9 +161,16 @@ class SpotifyClient:
                 with_context(self.logger, attempt=1)[0].error(f"spotify playlists request error: {e}")
                 raise
             if r.status_code == 401:
-                at = self.refresh_access_token()
-                headers = {"Authorization": f"Bearer {at}"}
-                r = requests.get(url, headers=headers, timeout=15)
+                try:
+                    at = self.refresh_access_token()
+                    headers = {"Authorization": f"Bearer {at}"}
+                    r = requests.get(url, headers=headers, timeout=15)
+                except RuntimeError as re:
+                    error_str = str(re)
+                    if error_str in ("refresh_token_revoked", "not_authenticated") or error_str.startswith("spotify_refresh_failed_http_"):
+                        raise re  # Re-raise for higher level handling
+                    else:
+                        raise
             r.raise_for_status()
             data = r.json()
             for p in data.get("items", []):
@@ -147,9 +192,16 @@ class SpotifyClient:
                 with_context(self.logger, attempt=1)[0].error(f"spotify playlist items error: {e}")
                 raise
             if r.status_code == 401:
-                at = self.refresh_access_token()
-                headers = {"Authorization": f"Bearer {at}"}
-                r = requests.get(url, headers=headers, timeout=15)
+                try:
+                    at = self.refresh_access_token()
+                    headers = {"Authorization": f"Bearer {at}"}
+                    r = requests.get(url, headers=headers, timeout=15)
+                except RuntimeError as re:
+                    error_str = str(re)
+                    if error_str in ("refresh_token_revoked", "not_authenticated") or error_str.startswith("spotify_refresh_failed_http_"):
+                        raise re  # Re-raise for higher level handling
+                    else:
+                        raise
             r.raise_for_status()
             data = r.json()
             for it in data.get("items", []):
@@ -187,9 +239,16 @@ class SpotifyClient:
         while url:
             r = requests.get(url, headers=headers, timeout=15)
             if r.status_code == 401:
-                at = self.refresh_access_token()
-                headers = {"Authorization": f"Bearer {at}"}
-                r = requests.get(url, headers=headers, timeout=15)
+                try:
+                    at = self.refresh_access_token()
+                    headers = {"Authorization": f"Bearer {at}"}
+                    r = requests.get(url, headers=headers, timeout=15)
+                except RuntimeError as re:
+                    error_str = str(re)
+                    if error_str in ("refresh_token_revoked", "not_authenticated") or error_str.startswith("spotify_refresh_failed_http_"):
+                        raise re  # Re-raise for higher level handling
+                    else:
+                        raise
             r.raise_for_status()
             data = r.json()
             albums.extend([a.get('id') for a in data.get('items', []) if a.get('id')])
@@ -209,17 +268,30 @@ class SpotifyClient:
         # fetch album name
         r0 = requests.get(f"https://api.spotify.com/v1/albums/{album_id}", headers=headers, timeout=15)
         if r0.status_code == 401:
-            at = self.refresh_access_token()
-            headers = {"Authorization": f"Bearer {at}"}
-            r0 = requests.get(f"https://api.spotify.com/v1/albums/{album_id}", headers=headers, timeout=15)
+            try:
+                at = self.refresh_access_token()
+                headers = {"Authorization": f"Bearer {at}"}
+                r0 = requests.get(f"https://api.spotify.com/v1/albums/{album_id}", headers=headers, timeout=15)
+            except RuntimeError as re:
+                if str(re) in ("refresh_token_revoked", "not_authenticated"):
+                    raise re  # Re-raise for higher level handling
+                else:
+                    raise
         if r0.ok:
             album_name = (r0.json() or {}).get('name')
         while url:
             r = requests.get(url, headers=headers, timeout=15)
             if r.status_code == 401:
-                at = self.refresh_access_token()
-                headers = {"Authorization": f"Bearer {at}"}
-                r = requests.get(url, headers=headers, timeout=15)
+                try:
+                    at = self.refresh_access_token()
+                    headers = {"Authorization": f"Bearer {at}"}
+                    r = requests.get(url, headers=headers, timeout=15)
+                except RuntimeError as re:
+                    error_str = str(re)
+                    if error_str in ("refresh_token_revoked", "not_authenticated") or error_str.startswith("spotify_refresh_failed_http_"):
+                        raise re  # Re-raise for higher level handling
+                    else:
+                        raise
             r.raise_for_status()
             data = r.json()
             for tr in data.get('items', []):

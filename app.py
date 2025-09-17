@@ -88,6 +88,11 @@ def build_app():
             pass
     st.register_persistence(load_snapshot, save_snapshot)
 
+    # Clean up stale download state from previous sessions
+    cleaned_items = st.cleanup_startup_state()
+    if cleaned_items > 0:
+        print(f"Cleaned up {cleaned_items} stale download items from previous session")
+
     # Now create the app with the service
     app_with_service = create_app(service=service, db_path=db_path)
 

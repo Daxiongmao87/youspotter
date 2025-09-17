@@ -43,7 +43,7 @@ def download_audio(candidate: Dict, track: Dict, cfg: Dict) -> bool:
     
     # Simplified yt-dlp options similar to LidaTube
     ydl_opts = {
-        'format': f"bestaudio[abr>={min_kbps}]",
+        'format': f"bestaudio[abr>={min_kbps}]/bestaudio/best",
         'outtmpl': outtmpl,
         'postprocessors': [
             {
