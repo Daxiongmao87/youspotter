@@ -33,6 +33,8 @@ RUN mkdir -p /app/data /app/downloads && chown youspotter:youspotter /app/data /
 # Change ownership of app directory to non-root user
 RUN chown -R youspotter:youspotter /app
 
+# Note: Don't switch to user here - entrypoint needs root to fix volume permissions
+
 # Set environment variables
 ENV YOUSPOTTER_DB=/app/data/youspotter.db
 ENV PORT=5000
