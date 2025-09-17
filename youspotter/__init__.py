@@ -11,10 +11,10 @@ from .storage import TokenStore
 
 def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = None):
     app = Flask(__name__)
-
-    # Add ProxyFix middleware to handle X-Forwarded-* headers from reverse proxies like Traefik
-    from werkzeug.middleware.proxy_fix import ProxyFix
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+    
+    # Configure Flask to prefer HTTPS for external URLs
+    # This ensures that url_for() generates HTTPS URLs even when the app runs on HTTP
+    app.config['PREFERRED_URL_SCHEME'] = 'https'
 
     db = DB(Path(db_path)) if db_path else None
 
