@@ -8,17 +8,8 @@ def init_web(app, db: DB, service):
     sc = SpotifyClient(db)
 
     def _get_redirect_uri():
-        # Use configured host_path if available, otherwise fall back to request context
-        # This ensures consistency between auth URL generation and callback validation
-        host_path = db.get_setting('host_path')
-        if host_path:
-            # Ensure scheme is present
-            if not host_path.startswith(('http://', 'https://')):
-                scheme = request.headers.get('X-Forwarded-Proto', 'http')
-                host_path = f"{scheme}://{host_path}"
-            # Remove trailing slash if present, before appending path
-            host_path = host_path.rstrip('/')
-            return f"{host_path}{url_for('web.auth_callback')}"
+        # Use request context to generate the redirect URI
+        # This ensures the URI matches what the frontend displays to the user
         return url_for('web.auth_callback', _external=True)
 
     @bp.route('/')
