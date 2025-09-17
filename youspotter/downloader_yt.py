@@ -114,14 +114,17 @@ def download_audio(candidate: Dict, track: Dict, cfg: Dict) -> bool:
         # Clean up any leftover thumbnail files
         try:
             import glob
-            # Get the base path without extension from the template
-            base_path = outtmpl.replace('%(' + 'ext' + ')s', '*')
+            # Build thumbnail pattern based on the output path structure
+            # yt-dlp saves thumbnails with the same base name but different extensions
+            base_name = outtmpl.replace('%(' + 'ext' + ')s', '')  # Remove extension placeholder
+
             # Look for common thumbnail extensions
             for ext in ['webp', 'jpg', 'jpeg', 'png']:
-                thumb_pattern = base_path.replace('*', ext)
+                thumb_pattern = base_name + ext
                 for thumb_file in glob.glob(thumb_pattern):
                     try:
                         os.remove(thumb_file)
+                        print(f"Cleaned up thumbnail: {thumb_file}")
                     except OSError:
                         pass
         except Exception:

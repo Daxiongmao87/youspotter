@@ -34,13 +34,16 @@ class SyncService:
         self._download_thread: Optional[threading.Thread] = None
         self._current_download_future = None  # Track current download for cancellation
 
-        # Lightweight status tracking (deadlock-free)
+        # Lightweight status tracking (deadlock-free) - now master
         self._status_lock = threading.Lock()
         self._live_status = {
             "current": [],  # Currently downloading items
             "pending": [],  # Pending queue items
             "completed": []  # Completed items with status
         }
+
+        # Load persistent queue into live queue on startup
+        self._load_persistent_into_live()
         self.fetch_playlist_strategies = fetch_playlist_strategies or (lambda: {})
         self.spotify_client = spotify_client
         self.catalog_refresh_callback = catalog_refresh_callback
@@ -202,14 +205,15 @@ class SyncService:
 
     def _process_download_queue(self):
         """Process downloads sequentially for concurrency=1"""
-        from youspotter.status import get_status, queue_move_to_current, queue_complete, add_recent
+        from youspotter.status import add_recent
         from youspotter.queue import identity_key
 
         try:
             print("Download worker: Starting queue processing")
-            status = get_status()
-            pending = status.get('queue', {}).get('pending', [])
-            current = status.get('queue', {}).get('current', [])
+            # Use live queue as source of truth
+            live_status = self.get_live_queue_status()
+            pending = live_status.get('pending', [])
+            current = live_status.get('current', [])
 
             print(f"Download worker: Queue status - {len(pending)} pending, {len(current)} current")
 
@@ -327,7 +331,7 @@ class SyncService:
             print("Download worker: Moving item to current queue")
             print(f"Download worker: Item details: {item_to_process}")
 
-            # Use lightweight status tracking (deadlock-free)
+            # Move to current in live queue (now the master)
             self.live_move_to_current(item_to_process)
 
             # Successfully moved to current queue
@@ -484,8 +488,9 @@ class SyncService:
                     except Exception as e:
                         print(f"Download worker: Error adding to failed list: {e}")
 
-            # Use lightweight status tracking (deadlock-free)
+            # Complete in live queue (now the master) and sync to persistent
             self.live_complete_item(item_to_process, success)
+            self.sync_to_persistent_queue()
             status_text = "successfully" if success else "with error"
             print(f"Download worker: Completed item {status_text}")
 
@@ -648,3 +653,45 @@ class SyncService:
             completed_item["status"] = "downloaded" if success else "missing"
             completed_item["timestamp"] = datetime.utcnow().isoformat() + "Z"
             self._live_status["completed"].insert(0, completed_item)
+
+    def sync_to_persistent_queue(self):
+        """Sync live queue state to persistent queue for UI and persistence"""
+        try:
+            from youspotter.status import set_queue
+            with self._status_lock:
+                # Sync pending and current items to persistent queue
+                pending_items = list(self._live_status["pending"])
+                current_items = list(self._live_status["current"])
+
+                # Combine for persistent queue (UI expects pending to include current)
+                all_pending = current_items + pending_items
+                set_queue(all_pending)
+
+                print(f"Synced to persistent: {len(current_items)} current + {len(pending_items)} pending")
+        except Exception as e:
+            print(f"Error syncing to persistent queue: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _load_persistent_into_live(self):
+        """Load persistent queue into live queue on startup"""
+        try:
+            from youspotter.status import get_status
+            status = get_status()
+            persistent_pending = status.get('queue', {}).get('pending', [])
+            persistent_current = status.get('queue', {}).get('current', [])
+
+            with self._status_lock:
+                # Restore any pending items to live queue
+                self._live_status["pending"] = list(persistent_pending)
+                # Any items that were "current" should go back to pending
+                # (they weren't completed in previous session)
+                self._live_status["pending"].extend(persistent_current)
+                # Clear current - download worker will populate as needed
+                self._live_status["current"] = []
+
+                print(f"Loaded persistent queue: {len(persistent_pending + persistent_current)} items restored to pending")
+        except Exception as e:
+            print(f"Error loading persistent queue: {e}")
+            import traceback
+            traceback.print_exc()
