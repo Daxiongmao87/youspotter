@@ -12,6 +12,10 @@ from .storage import TokenStore
 def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = None):
     app = Flask(__name__)
 
+    # Add ProxyFix middleware to handle X-Forwarded-* headers from reverse proxies like Traefik
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
     db = DB(Path(db_path)) if db_path else None
 
     @app.get('/status')
