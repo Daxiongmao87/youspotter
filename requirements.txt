@@ -5,3 +5,4 @@ requests==2.32.3
 spotipy==2.23.0
 ytmusicapi==1.8.2
 yt_dlp==2025.9.5
+pyOpenSSL==24.0.0
