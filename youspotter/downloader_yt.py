@@ -110,6 +110,24 @@ def download_audio(candidate: Dict, track: Dict, cfg: Dict) -> bool:
     try:
         with YDL(ydl_opts) as ydl:
             ydl.download([url])
+
+        # Clean up any leftover thumbnail files
+        try:
+            import glob
+            # Get the base path without extension from the template
+            base_path = outtmpl.replace('%(' + 'ext' + ')s', '*')
+            # Look for common thumbnail extensions
+            for ext in ['webp', 'jpg', 'jpeg', 'png']:
+                thumb_pattern = base_path.replace('*', ext)
+                for thumb_file in glob.glob(thumb_pattern):
+                    try:
+                        os.remove(thumb_file)
+                    except OSError:
+                        pass
+        except Exception:
+            # Don't fail the download if cleanup fails
+            pass
+
         return True
     except Exception as e:
         from .logging import get_logger, with_context

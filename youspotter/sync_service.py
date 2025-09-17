@@ -122,26 +122,34 @@ class SyncService:
                 fmt = (cfg.get('format') or 'mp3').lower()
                 tmpl = (cfg.get('path_template') or '{artist}/{album}/{artist} - {title}.{ext}').strip()
                 if host and _os.path.isabs(host) and _os.path.isdir(host):
-                    pattern = _re.compile(to_path_regex(tmpl))
-                    for root, _dirs, files in _os.walk(host):
-                        for fn in files:
-                            if not fn.lower().endswith(f'.{fmt}'):
-                                continue
-                            rel = _os.path.relpath(_os.path.join(root, fn), host)
-                            rel = rel.replace('\\', '/')  # normalize
-                            m = pattern.match(rel)
-                            if not m:
-                                continue
-                            gd = m.groupdict()
-                            a = normalize_text(gd.get('artist') or '')
-                            t = normalize_text(gd.get('title') or '')
-                            if a and t:
-                                existing_pairs.add((a, t))
+                    try:
+                        pattern = _re.compile(to_path_regex(tmpl))
+                        for root, _dirs, files in _os.walk(host):
+                            for fn in files:
+                                if not fn.lower().endswith(f'.{fmt}'):
+                                    continue
+                                rel = _os.path.relpath(_os.path.join(root, fn), host)
+                                rel = rel.replace('\\', '/')  # normalize
+                                m = pattern.match(rel)
+                                if not m:
+                                    continue
+                                gd = m.groupdict()
+                                a = normalize_text(gd.get('artist') or '')
+                                t = normalize_text(gd.get('title') or '')
+                                if a and t:
+                                    existing_pairs.add((a, t))
+                    except Exception as e:
+                        print(f"Warning: Filesystem deduplication failed: {e}")
+                        # Continue with existing_pairs (may be empty)
             if existing_pairs:
+                before_count = len(queue_tracks)
                 queue_tracks = [q for q in queue_tracks if (normalize_text(q.get('artist','')), normalize_text(q.get('title',''))) not in existing_pairs]
-        except Exception:
+                filtered_count = before_count - len(queue_tracks)
+                if filtered_count > 0:
+                    print(f"Filesystem deduplication: filtered out {filtered_count} existing tracks")
+        except Exception as e:
+            print(f"Error in filesystem deduplication: {e}")
             # If anything goes wrong, fall back to unfiltered queue
-            pass
 
         set_queue(queue_tracks)
         # Also populate lightweight status tracking
