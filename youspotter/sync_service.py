@@ -1,6 +1,7 @@
+import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from typing import List, Dict, Callable, Optional
 from youspotter.sync_lock import sync_lock
 from youspotter.status import set_status, get_status, set_totals, set_queue, queue_move_to_current, queue_complete, add_recent
@@ -16,18 +17,20 @@ class SyncService:
         self,
         fetch_spotify_tracks: Callable[[], List[Dict]],
         search_youtube: Callable[[Dict], List[Dict]],
-        download_func: Callable[[Dict, Dict, Dict], bool],
+        download_func: Callable[[Dict, Dict, Dict], tuple[bool, Optional[str]]],
         concurrency_cap: int = 3,
         db: DB | None = None,
         fetch_playlist_strategies: Optional[Callable[[], Dict[str,str]]] = None,
         spotify_client: Optional[object] = None,
         catalog_refresh_callback: Optional[Callable[[], None]] = None,
+        enable_watchdog: bool = True,
     ):
         self.fetch_spotify_tracks = fetch_spotify_tracks
         self.search_youtube = search_youtube
         self.download_func = download_func
         self.concurrency_cap = concurrency_cap
         self.db = db
+        self._enable_watchdog = enable_watchdog
         self._stop = threading.Event()
         self._paused = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -49,11 +52,19 @@ class SyncService:
         self.catalog_refresh_callback = catalog_refresh_callback
         self.interval_seconds = int(concurrency_cap and 0)  # placeholder; set in scheduler
         self.next_run_at: Optional[int] = None
-        self._failed_items = set()  # Track failed items to skip them
+
+        self._watched_path: Optional[str] = None
+        self._fs_observer = None
+        self._fs_watch_stop = threading.Event()
+        self._fs_poll_thread: Optional[threading.Thread] = None
+        self._pending_reconcile = threading.Event()
+        self._last_reconcile = 0.0
+        self._reconcile_interval = 10.0
 
     def sync_spotify_tracks(self) -> bool:
         """Sync Spotify track data and update pending queue"""
-        tracks = self.fetch_spotify_tracks() or []
+        raw_tracks = self.fetch_spotify_tracks() or []
+        tracks = list(raw_tracks)
         # Expand per playlist strategies if provided
         try:
             strategies = self.fetch_playlist_strategies() or {}
@@ -98,7 +109,25 @@ class SyncService:
         except Exception:
             pass
 
-        # Compute totals for tracking
+        # Deduplicate tracks using identity key to avoid duplicate queue entries
+        deduped_tracks: List[Dict] = []
+        seen_identities = set()
+        for track in tracks:
+            try:
+                ident = identity_key(track)
+            except Exception:
+                ident = None
+            if not ident:
+                continue
+            if ident in seen_identities:
+                continue
+            seen_identities.add(ident)
+            deduped_tracks.append(dict(track))
+
+        tracks = deduped_tracks
+
+        # Compute totals for tracking using deduplicated list
+        songs = artists = albums = 0
         try:
             songs = len(tracks)
             artists = len({t.get('artist','') for t in tracks})
@@ -108,65 +137,213 @@ class SyncService:
         except Exception:
             pass
 
-        # Add tracks to persistent pending queue, filtered by filesystem presence
-        from youspotter.status import set_queue, add_recent
-        queue_tracks = [{k: t.get(k) for k in ('artist','title','album','duration')} for t in tracks]
+        from youspotter.status import add_recent
 
-        # Filesystem-as-truth: remove items that already exist on disk
-        try:
-            existing_pairs = set()
-            if self.db:
-                from youspotter.config import load_config
-                from youspotter.utils.path_template import to_path_regex
-                from youspotter.utils.matching import normalize_text
-                import os as _os, re as _re
-                cfg = load_config(self.db)
-                host = (cfg.get('host_path') or '').strip()
-                fmt = (cfg.get('format') or 'mp3').lower()
-                tmpl = (cfg.get('path_template') or '{artist}/{album}/{artist} - {title}.{ext}').strip()
-                if host and _os.path.isabs(host) and _os.path.isdir(host):
-                    try:
-                        pattern = _re.compile(to_path_regex(tmpl))
-                        for root, _dirs, files in _os.walk(host):
-                            for fn in files:
-                                if not fn.lower().endswith(f'.{fmt}'):
-                                    continue
-                                rel = _os.path.relpath(_os.path.join(root, fn), host)
-                                rel = rel.replace('\\', '/')  # normalize
-                                m = pattern.match(rel)
-                                if not m:
-                                    continue
-                                gd = m.groupdict()
-                                a = normalize_text(gd.get('artist') or '')
-                                t = normalize_text(gd.get('title') or '')
-                                if a and t:
-                                    existing_pairs.add((a, t))
-                    except Exception as e:
-                        print(f"Warning: Filesystem deduplication failed: {e}")
-                        # Continue with existing_pairs (may be empty)
-            if existing_pairs:
-                before_count = len(queue_tracks)
-                queue_tracks = [q for q in queue_tracks if (normalize_text(q.get('artist','')), normalize_text(q.get('title',''))) not in existing_pairs]
-                filtered_count = before_count - len(queue_tracks)
-                if filtered_count > 0:
-                    print(f"Filesystem deduplication: filtered out {filtered_count} existing tracks")
-        except Exception as e:
-            print(f"Error in filesystem deduplication: {e}")
-            # If anything goes wrong, fall back to unfiltered queue
+        catalog_items: List[Dict] = []
+        for track in tracks:
+            artist = track.get('artist', '').strip() or 'Unknown'
+            title = track.get('title', '').strip() or 'Unknown'
+            album = track.get('album') or ''
+            duration = int(track.get('duration') or 0)
+            ident = identity_key(track)
+            catalog_items.append({
+                'identity': ident,
+                'artist': artist,
+                'title': title,
+                'album': album,
+                'duration': duration,
+                'playlist_id': track.get('playlist_id'),
+                'spotify_id': track.get('id') or track.get('spotify_id'),
+                'expanded_from': track.get('expanded_from', 'playlist'),
+            })
 
-        set_queue(queue_tracks)
-        # Also populate lightweight status tracking
-        self.set_live_pending_queue(queue_tracks)
+        if self.db:
+            try:
+                self.db.upsert_tracks(catalog_items)
+            except Exception as db_err:
+                print(f"Warning: failed to upsert catalog: {db_err}")
 
-        add_recent(f"Synced {len(tracks)} tracks from Spotify ({songs} songs, {artists} artists, {albums} albums) — pending after filesystem filter: {len(queue_tracks)}", "SUCCESS")
+        reconciliation = self.reconcile_catalog(force=True)
+        if reconciliation:
+            pending_count = len(reconciliation.get('pending', []))
+        else:
+            live = self.get_live_queue_status()
+            pending_count = len(live.get('pending', []))
+
+        add_recent(
+            f"Synced {len(tracks)} tracks from Spotify ({songs} songs, {artists} artists, {albums} albums) — pending: {pending_count}",
+            "SUCCESS",
+        )
 
         return True
 
-    def run_once(self) -> bool:
-        """Legacy method - now just syncs Spotify tracks"""
+    def reconcile_catalog(self, force: bool = False) -> Optional[Dict]:
+        if not self.db:
+            return None
+
+        try:
+            now = time.time()
+            if not force and now - self._last_reconcile < self._reconcile_interval:
+                return None
+
+            self.db.reconcile_catalog_paths()
+            counts = self.db.get_catalog_counts()
+
+            from youspotter.status import set_totals, set_status, set_queue
+
+            set_totals(counts['songs'], counts['artists'], counts['albums'])
+            set_status({
+                'missing': counts['missing'],
+                'downloaded': counts['downloaded'],
+            })
+
+            pending_records = self.db.select_tracks_for_queue()
+            pending_queue = [
+                {
+                    'artist': item['artist'],
+                    'title': item['title'],
+                    'album': item['album'],
+                    'duration': item['duration'],
+                    'identity': item['identity'],
+                }
+                for item in pending_records
+            ]
+
+            self.set_live_pending_queue(pending_queue)
+            set_queue([{k: v for k, v in item.items() if k != 'identity'} for item in pending_queue])
+
+            self._last_reconcile = now
+
+            if self.catalog_refresh_callback:
+                try:
+                    threading.Thread(target=self.catalog_refresh_callback, daemon=True).start()
+                except Exception as refresh_err:
+                    print(f"Warning: failed to refresh catalog cache: {refresh_err}")
+
+            self._ensure_watchdog()
+
+            return {
+                'pending': pending_queue,
+                'counts': counts,
+            }
+        except Exception as exc:
+            print(f"Warning: catalog reconciliation failed: {exc}")
+            return None
+
+    def _ensure_watchdog(self):
+        if not self._enable_watchdog or not self.db:
+            return
+        try:
+            cfg = load_config(self.db)
+            host_path = (cfg.get('host_path') or '').strip()
+        except Exception:
+            host_path = ''
+
+        normalized = host_path if host_path and os.path.isdir(host_path) else None
+        if normalized == self._watched_path:
+            return
+
+        self._stop_filesystem_monitor()
+        self._watched_path = normalized
+        if normalized:
+            self._start_filesystem_monitor(normalized)
+
+    def _start_filesystem_monitor(self, path: str):
+        if not self._enable_watchdog:
+            return
+        self._fs_watch_stop.clear()
+        try:
+            from watchdog.observers import Observer
+            from watchdog.events import FileSystemEventHandler
+        except ImportError:
+            print("Watchdog not available; falling back to polling monitor")
+            self._start_polling_monitor(path)
+            return
+
+        class CatalogHandler(FileSystemEventHandler):
+            def __init__(self, outer):
+                self._outer = outer
+
+            def on_any_event(self, event):
+                self._outer._schedule_reconcile()
+
+        observer = Observer()
+        handler = CatalogHandler(self)
+        try:
+            observer.schedule(handler, path, recursive=True)
+            observer.start()
+            self._fs_observer = observer
+        except Exception as e:
+            print(f"Warning: unable to start filesystem observer: {e}")
+            self._start_polling_monitor(path)
+
+    def _start_polling_monitor(self, path: str):
+        if self._fs_poll_thread and self._fs_poll_thread.is_alive():
+            return
+
+        stop_event = self._fs_watch_stop
+
+        def snapshot() -> tuple[int, int]:
+            try:
+                stat = os.stat(path)
+                return int(stat.st_mtime), int(stat.st_size)
+            except FileNotFoundError:
+                return 0, 0
+
+        last_snapshot = snapshot()
+
+        def poll_loop():
+            nonlocal last_snapshot
+            while not stop_event.wait(30):
+                current = snapshot()
+                if current != last_snapshot:
+                    self._schedule_reconcile()
+                last_snapshot = current
+
+        thread = threading.Thread(target=poll_loop, daemon=True)
+        thread.start()
+        self._fs_poll_thread = thread
+
+    def _stop_filesystem_monitor(self):
+        if self._fs_observer:
+            try:
+                self._fs_observer.stop()
+                self._fs_observer.join(timeout=2)
+            except Exception:
+                pass
+            finally:
+                self._fs_observer = None
+        if self._fs_poll_thread:
+            self._fs_watch_stop.set()
+            self._fs_poll_thread.join(timeout=2)
+            self._fs_poll_thread = None
+            self._fs_watch_stop.clear()
+        self._watched_path = None
+
+    def _schedule_reconcile(self):
+        if self._pending_reconcile.is_set():
+            return
+        self._pending_reconcile.set()
+
+        def run():
+            try:
+                time.sleep(1)
+                self.reconcile_catalog(force=True)
+            finally:
+                self._pending_reconcile.clear()
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def run_once(self, reason: str = "manual") -> bool:
+        """Run a single sync cycle, logging the trigger reason."""
         with sync_lock() as acquired:
             if not acquired:
                 return False
+            try:
+                from youspotter.status import add_recent
+                add_recent(f"Sync starting ({reason})", "INFO")
+            except Exception:
+                pass
             return self.sync_spotify_tracks()
 
     def _download_worker_loop(self):
@@ -210,106 +387,34 @@ class SyncService:
 
         try:
             print("Download worker: Starting queue processing")
-            # Use live queue as source of truth
+            reconciliation = self.reconcile_catalog()
             live_status = self.get_live_queue_status()
             pending = live_status.get('pending', [])
             current = live_status.get('current', [])
 
             print(f"Download worker: Queue status - {len(pending)} pending, {len(current)} current")
 
-            # For concurrency=1, only process if nothing is currently downloading
             if current:
                 print(f"Download worker: Skipping - already downloading {len(current)} items")
-                return  # Already downloading something
+                return
 
             if not pending:
                 print("Download worker: No pending items to process")
-                return  # Nothing to download
+                return
 
-            print(f"Download worker: Found {len(pending)} pending items, starting processing")
+            item_to_process = dict(pending[0])
+            print(f"Download worker: Selected item: {item_to_process.get('artist','unknown')} - {item_to_process.get('title','')}")
         except Exception as e:
-            print(f"Download worker: Error in initial queue check: {e}")
+            print(f"Download worker: Error preparing queue: {e}")
             import traceback
             traceback.print_exc()
             return
 
-        # Load retry schedule - database should now be thread-safe
-        try:
-            if self.db:
-                import json
-                retry_raw = self.db.get_setting('retry_schedule') or '{}'
-                retry_schedule = json.loads(retry_raw)
-            else:
-                retry_schedule = {}
-        except Exception as e:
-            print(f"Download worker: Error loading retry schedule: {e}")
-            retry_schedule = {}
-
-        # Find first available item considering retry schedule and failed items
-        print("Download worker: Selecting item to process")
-        import time
-        current_time = int(time.time())
-
-        item_to_process = None
-        skipped_count = 0
-        for item in pending:
-            try:
-                ik = identity_key(item)
-
-                # Check if item is in temporary failed list (current session)
-                if ik in self._failed_items:
-                    skipped_count += 1
-                    continue
-
-                # Check retry schedule for items that failed in previous sessions
-                retry_time = retry_schedule.get(ik, 0)
-                if retry_time > current_time:
-                    print(f"Download worker: Skipping item {item.get('artist', 'unknown')} - {item.get('title', '')} (retry in {retry_time - current_time}s)")
-                    skipped_count += 1
-                    continue
-
-                # This item is available for processing
-                item_to_process = item
-                break
-
-            except Exception as e:
-                print(f"Download worker: Error checking item: {e}")
-                continue
-
-        if not item_to_process:
-            print(f"Download worker: No items available - {skipped_count} items skipped (failed or on retry cooldown)")
-            # After checking 50 items, clear failed list to retry everything
-            if skipped_count >= 50:
-                self._failed_items.clear()
-                print("Download worker: Cleared failed items list after checking 50 items, will retry all")
-                if pending:
-                    # Still check retry schedule for the first item
-                    first_item = pending[0]
-                    try:
-                        ik = identity_key(first_item)
-                        retry_time = retry_schedule.get(ik, 0)
-                        if retry_time <= current_time:
-                            item_to_process = first_item
-                        else:
-                            print(f"Download worker: First item still on retry cooldown ({retry_time - current_time}s)")
-                            return
-                    except Exception:
-                        item_to_process = first_item
-                else:
-                    return
-            else:
-                print("Download worker: No non-failed items found, waiting for next iteration")
-                return
-
-        print(f"Download worker: Selected item: {item_to_process.get('artist','unknown')} - {item_to_process.get('title','')}")
-
-        # Load config - database should now be thread-safe
         try:
             print("Download worker: Loading configuration")
             from youspotter.config import load_config
             cfg = load_config(self.db) if self.db else {}
             if not cfg.get('host_path'):
-                # Fallback to defaults if no config
                 cfg = {
                     "host_path": "/home/patrick/Music",
                     "bitrate": 192,
@@ -326,18 +431,11 @@ class SyncService:
             traceback.print_exc()
             cfg = {"host_path": "/home/patrick/Music", "bitrate": 192, "format": "mp3"}
 
-        # Move item to current status ONLY when actually starting
         try:
             print("Download worker: Moving item to current queue")
             print(f"Download worker: Item details: {item_to_process}")
-
-            # Move to current in live queue (now the master)
             self.live_move_to_current(item_to_process)
-
-            # Successfully moved to current queue
             print(f"Download worker: Starting download: {item_to_process.get('artist','unknown')} - {item_to_process.get('title','')}")
-            print("Download worker: Moved to current queue, proceeding to download")
-
         except Exception as e:
             print(f"Download worker: Error moving to current queue: {e}")
             import traceback
@@ -353,7 +451,6 @@ class SyncService:
             candidates = self.search_youtube(item_to_process) or []
             print(f"Download worker: Found {len(candidates)} YouTube candidates")
 
-            # Log the first few candidates for debugging
             if candidates:
                 print("Download worker: Top candidates:")
                 for i, c in enumerate(candidates[:3]):
@@ -371,150 +468,89 @@ class SyncService:
                     mode = "strict" if use_strict else "fuzzy"
                     print(f"Download worker: Candidate #{i+1} rejected by {mode} matching algorithm: {c.get('title', 'N/A')}")
 
-            if not picked and candidates:
-                print(f"Download worker: No matching candidate found among {len(candidates)} results")
-                print(f"Download worker: Search query was: '{search_query}'")
-                print(f"Download worker: Expected: {item_to_process.get('artist', 'unknown')} - {item_to_process.get('title', '')}")
-            elif not picked:
-                print("Download worker: No matching candidate found - no search results")
-
+            if not picked:
+                reason = "no search results" if not candidates else f"no matches among {len(candidates)} candidates"
+                print(f"Download worker: No match found - {reason}")
+                artist = item_to_process.get('artist', 'unknown')
+                title = item_to_process.get('title', '')
+                add_recent(f"No YouTube match for {artist} - {title} ({reason})", "ERROR")
         except Exception as e:
             print(f"Download worker: Error in YouTube search: {e}")
-            print(f"Download worker: YouTube search failed for {item_to_process.get('artist','unknown')} - {item_to_process.get('title','')}: {str(e)}")
             import traceback
             traceback.print_exc()
-            candidates = []
             picked = None
 
         success = False
         was_cancelled = False
-        if not picked:
-            reason = "no search results" if not candidates else f"no matches among {len(candidates)} candidates"
-            print(f"Download worker: No match found - {reason}")
-            print(f"Download worker: No matching YouTube result for {item_to_process.get('artist','unknown')} - {item_to_process.get('title','')}")
+        downloaded_path = None
+        error_reason = None
 
-            # Add to recent activity log for user visibility
-            from youspotter.status import add_recent
-            artist = item_to_process.get('artist', 'unknown')
-            title = item_to_process.get('title', '')
-            add_recent(f"No YouTube match for {artist} - {title} ({reason})", "ERROR")
-        else:
-            # Download with progress callback
-            def progress_cb(percent: int):
-                try:
-                    # Use lightweight progress tracking
-                    self.live_update_progress(item_to_process, percent)
-                except Exception as e:
-                    print(f"Download worker: Error updating progress: {e}")
-
-            # Download with timeout mechanism
+        if picked:
             try:
-                print(f"Download worker: Starting download for {item_to_process.get('artist','unknown')} - {item_to_process.get('title','')}")
+                from youspotter.status import queue_update_progress
+
+                def progress_callback(percent: int):
+                    self.live_update_progress(item_to_process, percent)
+                    queue_update_progress(item_to_process, percent)
+
                 cfg_with_progress = dict(cfg)
-                cfg_with_progress['progress_cb'] = progress_cb
+                cfg_with_progress['progress_cb'] = progress_callback
 
-                # Implement timeout mechanism using ThreadPoolExecutor
                 import concurrent.futures
-                download_timeout = 300  # 5 minutes timeout
-
+                download_timeout = 300
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                     print(f"Download worker: Starting download with {download_timeout}s timeout")
                     future = executor.submit(self.download_func, picked, item_to_process, cfg_with_progress)
-                    self._current_download_future = future  # Track for cancellation
+                    self._current_download_future = future
                     try:
-                        success = future.result(timeout=download_timeout)
+                        result = future.result(timeout=download_timeout)
+                        if isinstance(result, tuple):
+                            success, downloaded_path = result
+                        else:
+                            success = bool(result)
                         print(f"Download worker: Download {'successful' if success else 'failed'}")
                     except concurrent.futures.TimeoutError:
-                        print(f"Download worker: Download timed out after {download_timeout} seconds")
-                        add_recent(f"Download timeout for {item_to_process.get('artist', 'unknown')} - {item_to_process.get('title', '')}", "ERROR")
-                        success = False
-                        # Cancel the future to prevent resource leaks
-                        future.cancel()
-                    except concurrent.futures.CancelledError:
-                        print(f"Download worker: Download was cancelled")
                         success = False
                         was_cancelled = True
+                        error_reason = f"timeout after {download_timeout}s"
+                        add_recent(f"Download timeout for {item_to_process.get('artist', 'unknown')} - {item_to_process.get('title', '')}", "ERROR")
+                        future.cancel()
+                    except concurrent.futures.CancelledError:
+                        success = False
+                        was_cancelled = True
+                        error_reason = "cancelled"
                     finally:
-                        self._current_download_future = None  # Clear tracking
-
+                        self._current_download_future = None
             except Exception as e:
-                print(f"Download worker: Download exception: {e}")
+                success = False
+                error_reason = str(e)
+                print(f"Download worker: Download exception: {error_reason}")
                 import traceback
                 traceback.print_exc()
-                print(f"Download worker: Download exception for {item_to_process.get('artist', 'unknown')} - {item_to_process.get('title', '')}: {str(e)}")
-                success = False
+        else:
+            error_reason = "no candidate"
 
-        # Handle completion
         try:
-            print(f"Download worker: Handling completion - success: {success}")
             if success:
                 artist = item_to_process.get('artist', 'unknown')
                 title = item_to_process.get('title', '')
-                print(f"Download worker: Downloaded {artist} - {title}")
-                print("Download worker: Download successful")
-
-                # Add to recent activity log for user visibility
-                from youspotter.status import add_recent
                 add_recent(f"Downloaded {artist} - {title}", "SUCCESS")
+                if self.db and downloaded_path:
+                    self.db.mark_download_success(identity_key(item_to_process), downloaded_path)
             else:
-                if was_cancelled:
-                    print(f"Download worker: Download was cancelled for {item_to_process.get('artist', 'unknown')} - {item_to_process.get('title', '')}")
-                    print("Download worker: Will put cancelled item back at front of queue")
-                    # TODO: Put cancelled item back at front of queue when resume happens
-                    # For now, just don't mark it as failed so it can be retried
-                else:
-                    print(f"Download worker: Failed to download {item_to_process.get('artist', 'unknown')} - {item_to_process.get('title', '')}")
-                    print("Download worker: Download failed")
-                    # Add to failed items and retry schedule
-                    try:
-                        import time
-                        ik = identity_key(item_to_process)
-                        self._failed_items.add(ik)
+                if not was_cancelled and self.db:
+                    reason_message = error_reason or "download failed"
+                    self.db.mark_download_failure(identity_key(item_to_process), reason_message)
 
-                        # Calculate exponential backoff for retry (5 min, 15 min, 45 min, 2.25 hours, etc)
-                        current_retry_time = retry_schedule.get(ik, 0)
-                        current_time = int(time.time())
-
-                        if current_retry_time == 0:
-                            # First failure - retry in 5 minutes
-                            retry_delay = 300  # 5 minutes
-                        else:
-                            # Exponential backoff - triple the delay each time, max 6 hours
-                            last_delay = current_retry_time - current_time if current_retry_time > current_time else 300
-                            retry_delay = min(last_delay * 3, 21600)  # Max 6 hours
-
-                        retry_schedule[ik] = current_time + retry_delay
-                        print(f"Download worker: Added item to failed list ({len(self._failed_items)} total failed), retry in {retry_delay//60} minutes")
-                    except Exception as e:
-                        print(f"Download worker: Error adding to failed list: {e}")
-
-            # Complete in live queue (now the master) and sync to persistent
             self.live_complete_item(item_to_process, success)
             self.sync_to_persistent_queue()
-            status_text = "successfully" if success else "with error"
-            print(f"Download worker: Completed item {status_text}")
-
         except Exception as e:
             print(f"Download worker: Error in completion handling: {e}")
             import traceback
             traceback.print_exc()
 
-        # Save retry schedule back to database
-        try:
-            if self.db and retry_schedule:
-                import json
-                self.db.set_setting('retry_schedule', json.dumps(retry_schedule))
-        except Exception as e:
-            print(f"Download worker: Error saving retry schedule: {e}")
-
-        # Refresh catalog cache after downloads
-        if self.catalog_refresh_callback:
-            try:
-                print("Download worker: Starting catalog cache refresh")
-                refresh_thread = threading.Thread(target=self.catalog_refresh_callback, daemon=True)
-                refresh_thread.start()
-            except Exception as e:
-                print(f"Download worker: Error starting catalog refresh: {e}")
+        if self.db:
+            self.reconcile_catalog(force=True)
 
         print("Download worker: Processing completed for this iteration")
 
@@ -529,15 +565,28 @@ class SyncService:
         if self._thread and self._thread.is_alive():
             return
         def loop():
+            import time as _t
             while not self._stop.is_set():
-                # Set next run time before sleeping so UI can show ETA
+                # Indicate sync is running by clearing next_run_at
+                self.next_run_at = None
+                self.run_once(reason="scheduled")
+
+                completed_at = _t.time()
                 try:
-                    import time as _t
-                    self.next_run_at = int(_t.time()) + int(interval_seconds)
+                    self.next_run_at = int(completed_at + int(interval_seconds))
                 except Exception:
                     self.next_run_at = None
-                self.run_once()
-                self._stop.wait(interval_seconds)
+
+                # Wait the remaining interval duration (accounting for sync duration)
+                while not self._stop.is_set():
+                    now = _t.time()
+                    wait_seconds = (completed_at + int(interval_seconds)) - now
+                    if wait_seconds <= 0:
+                        break
+                    # Wait in small increments so stop signal is responsive
+                    sleep_for = min(wait_seconds, 1.0)
+                    self._stop.wait(sleep_for)
+                completed_at = _t.time()
         self._stop.clear()
         # Record configured interval for status/debugging
         self._interval = int(interval_seconds)
@@ -560,9 +609,14 @@ class SyncService:
         """Stop the download worker"""
         if self._download_thread:
             self._download_thread.join(timeout=1.0)
+        self._stop_filesystem_monitor()
 
     def sync_now(self) -> bool:
-        return self.run_once()
+        return self.run_once(reason="manual")
+
+    def notify_config_updated(self):
+        self._ensure_watchdog()
+        self._schedule_reconcile()
 
     def pause_downloads(self):
         """Pause the download worker and cancel current download"""
@@ -603,6 +657,10 @@ class SyncService:
                 "pending": list(self._live_status["pending"]),
                 "completed": list(self._live_status["completed"])
             }
+
+    def bootstrap_live_queue_from_status(self):
+        """Refresh live queue snapshot from persisted status state."""
+        self._load_persistent_into_live()
 
     def set_live_pending_queue(self, items: List[Dict]):
         """Set pending queue items"""
@@ -651,7 +709,7 @@ class SyncService:
             # Add to completed
             completed_item = dict(item)
             completed_item["status"] = "downloaded" if success else "missing"
-            completed_item["timestamp"] = datetime.utcnow().isoformat() + "Z"
+            completed_item["timestamp"] = datetime.now(timezone.utc).isoformat()
             self._live_status["completed"].insert(0, completed_item)
 
     def sync_to_persistent_queue(self):

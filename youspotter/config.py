@@ -2,6 +2,7 @@ from typing import Dict
 
 VALID_BITRATES = {128, 192, 256, 320}
 VALID_FORMATS = {"mp3", "flac", "m4a", "wav"}
+VALID_CONCURRENCY = {1, 2, 3, 4}
 
 
 def load_config(db) -> Dict:

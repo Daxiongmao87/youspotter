@@ -1,6 +1,6 @@
 from typing import Dict, List, Callable, Optional
 from threading import Lock
-from datetime import datetime
+from datetime import datetime, timezone
 
 _lock = Lock()
 _state = {
@@ -41,7 +41,7 @@ def set_totals(songs: int, artists: int, albums: int):
 
 def add_recent(message: str, level: str = "INFO", limit: int = 50):
     with _lock:
-        timestamp = datetime.utcnow().strftime("%H:%M:%S")
+        timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
         formatted_message = f"[{timestamp}] {level}: {message}"
         _state["recent"].insert(0, formatted_message)
         if len(_state["recent"]) > limit:
@@ -75,7 +75,7 @@ def queue_complete(item: Dict, ok: bool):
         _state["queue"]["current"] = [c for c in _state["queue"]["current"] if identity_key(c) != item_key]
         rec = dict(item)
         rec["status"] = "downloaded" if ok else "missing"
-        rec["timestamp"] = datetime.utcnow().isoformat() + "Z"
+        rec["timestamp"] = datetime.now(timezone.utc).isoformat()
         _state["queue"]["completed"].insert(0, rec)
         if _persist_save:
             _persist_save(dict(_state))

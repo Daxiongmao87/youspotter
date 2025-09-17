@@ -18,6 +18,8 @@ class FakeYDL:
         }
     def download(self, urls):
         # simulate success
+        for hook in self.opts.get('progress_hooks', []):
+            hook({'status': 'finished', 'filename': str(urls[0])})
         return
 
 
@@ -29,9 +31,10 @@ def test_download_rejects_below_min(monkeypatch, tmp_path):
     monkeypatch.setattr(d, '_get_YoutubeDL', lambda: ProbeOnly)
     cfg = {'host_path': str(tmp_path), 'bitrate': 160, 'format': 'mp3'}
     # Will accept since 160 is available
-    ok = download_audio({'url': 'http://x'}, {'artist': 'A', 'title': 'T'}, cfg)
+    ok, path = download_audio({'url': 'http://x'}, {'artist': 'A', 'title': 'T'}, cfg)
     assert ok is True
     # Require 192 → reject
     cfg2 = {'host_path': str(tmp_path), 'bitrate': 192, 'format': 'mp3'}
-    ok2 = download_audio({'url': 'http://x'}, {'artist': 'A', 'title': 'T'}, cfg2)
+    ok2, path2 = download_audio({'url': 'http://x'}, {'artist': 'A', 'title': 'T'}, cfg2)
     assert ok2 is False
+    assert path2 is None

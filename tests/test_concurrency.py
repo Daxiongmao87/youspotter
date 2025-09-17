@@ -21,8 +21,7 @@ def test_concurrency_cap_enforced():
         time.sleep(0.05)
         with lock:
             active -= 1
-        return True
-    svc = SyncService(fetch, search, download, concurrency_cap=2)
+        return True, None
+    svc = SyncService(fetch, search, download, concurrency_cap=2, enable_watchdog=False)
     svc.run_once()
     assert max_active <= 2
-

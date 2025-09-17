@@ -823,6 +823,8 @@
 
       // Store unfiltered catalog data
       let catalogData = [];
+      let catalogLoading = false;
+      let catalogLoaded = false;
       let queueData = {};
 
       // Add filtering functionality
@@ -925,24 +927,35 @@
 
       async function loadCatalog() {
         const grid = document.getElementById('catalog_grid');
+        catalogLoading = true;
+        catalogLoaded = false;
+        catalogData = [];
+        stopLoadingAnimation();
+        startLoadingAnimation(grid);
 
         try {
-          // Fast cache-based loading - no animation needed
           const response = await fetch(`/catalog/${currentCatalogMode}`);
           const data = await response.json();
 
           if (!response.ok) {
-            grid.innerHTML = `<div class="help-card">Error loading catalog: ${data.error || 'Unknown error'}</div>`;
+            stopLoadingAnimation();
+            catalogLoading = false;
+            catalogLoaded = false;
+            grid.innerHTML = `<div class="help-card" role="alert">Error loading catalog: ${data.error || 'Unknown error'}</div>`;
             return;
           }
 
-          // Store unfiltered data
           catalogData = data.items || [];
-
-          // Apply current filters
+          catalogLoaded = true;
+          stopLoadingAnimation();
           applyCatalogFilters();
         } catch (error) {
-          grid.innerHTML = `<div class="help-card">Failed to load catalog: ${error.message}</div>`;
+          stopLoadingAnimation();
+          catalogLoading = false;
+          catalogLoaded = false;
+          grid.innerHTML = `<div class="help-card" role="alert">Failed to load catalog: ${error.message}</div>`;
+        } finally {
+          catalogLoading = false;
         }
       }
 
@@ -950,7 +963,7 @@
         const frames = ['▘', '▀', '▝', '▐', '▗', '▄', '▖', '▌'];
         let frameIndex = 0;
 
-        element.innerHTML = `<div class="help-card loading-animation">Loading ${currentCatalogMode}... <span id="loading-spinner">▘</span></div>`;
+        element.innerHTML = `<div class="help-card loading-animation" role="status" aria-live="polite">Loading ${currentCatalogMode}... <span id="loading-spinner">▘</span></div>`;
 
         loadingAnimationInterval = setInterval(() => {
           const spinner = document.getElementById('loading-spinner');
@@ -970,7 +983,18 @@
 
       function renderCatalogGrid(items) {
         const grid = document.getElementById('catalog_grid');
-        if (items.length === 0) {
+        if (catalogLoading && !catalogLoaded) {
+          startLoadingAnimation(grid);
+          return;
+        }
+        stopLoadingAnimation();
+
+        if (!catalogLoaded) {
+          startLoadingAnimation(grid);
+          return;
+        }
+
+        if (!items || items.length === 0) {
           grid.innerHTML = '<div class="help-card">No items found</div>';
           return;
         }

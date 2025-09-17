@@ -1,12 +1,19 @@
 import os
 from flask import Flask, request, jsonify
-from typing import Optional
+from typing import Dict, Optional
 
 from pathlib import Path
 from .status import get_status
 from .storage import DB
 from .sync_service import SyncService
 from .storage import TokenStore
+from .config import (
+    save_config,
+    load_config,
+    VALID_BITRATES,
+    VALID_FORMATS,
+    VALID_CONCURRENCY,
+)
 
 
 def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = None):
@@ -21,28 +28,25 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
     @app.get('/status')
     def status():
         st = get_status()
-        # Normalize headline counters from durable sources
+        # Normalize headline counters from catalog database
         try:
-            # Derive missing/downloading from the queue snapshot (persistent)
+            if db:
+                counts = db.get_catalog_counts()
+                st['songs'] = counts['songs']
+                st['artists'] = counts['artists']
+                st['albums'] = counts['albums']
+                st['downloaded'] = counts['downloaded']
+                st['missing'] = counts['missing']
+        except Exception as catalog_err:
+            print(f"Warning: unable to read catalog counts: {catalog_err}")
+
+        # Derive downloading from queue snapshot (current items)
+        try:
             q = (st or {}).get('queue', {}) or {}
             current = q.get('current', []) or []
-            completed = q.get('completed', []) or []
             st['downloading'] = len(current)
-            st['missing'] = len([x for x in completed if x.get('status') == 'missing'])
-
-            # Derive downloaded from filesystem (source of truth)
-            downloaded_files = 0
-            if db:
-                from .config import load_config
-                from .utils.download_counter import count_files
-                cfg = load_config(db)
-                host = (cfg.get('host_path') or '').strip()
-                fmt = (cfg.get('format') or 'mp3').lower()
-                downloaded_files = count_files(host, fmt, ttl_seconds=10)
-            st['downloaded'] = int(downloaded_files)
         except Exception:
-            # Best-effort normalization; never fail the endpoint
-            pass
+            st['downloading'] = st.get('downloading', 0)
         # Surface scheduler info if available
         try:
             if service and hasattr(service, 'get_schedule'):
@@ -192,7 +196,8 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
             for item in current_items:
                 item_copy = dict(item)
                 item_copy['status'] = 'missing'
-                item_copy['timestamp'] = __import__('datetime').datetime.utcnow().isoformat() + 'Z'
+                from datetime import datetime, timezone
+                item_copy['timestamp'] = datetime.now(timezone.utc).isoformat()
                 completed_items.insert(0, item_copy)
 
             # Update status with cleared current queue
@@ -241,6 +246,8 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
         host_path = data.get('host_path') or ''
         bitrate = int(data.get('bitrate', 128))
         fmt = (data.get('format') or 'mp3').lower()
+        current_cfg = load_config(db)
+        concurrency = int(data.get('concurrency', current_cfg.get('concurrency', 3)))
         client_id = (data.get('spotify_client_id') or '').strip()
         path_template = (data.get('path_template') or '{artist}/{album}/{artist} - {title}.{ext}').strip()
         # Validation per spec
@@ -250,6 +257,8 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
             return jsonify({"error": "invalid format"}), 400
         if not host_path.startswith('/'):
             return jsonify({"error": "host_path must be an absolute folder path"}), 400
+        if concurrency not in VALID_CONCURRENCY:
+            return jsonify({"error": "invalid concurrency"}), 400
         # Validate path template
         from .utils.path_template import validate_user_template
         try:
@@ -260,12 +269,18 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
             'host_path': host_path,
             'bitrate': bitrate,
             'format': fmt,
+            'concurrency': concurrency,
             'spotify_client_id': client_id,
             'path_template': path_template,
             'yt_cookie': (data.get('yt_cookie') or '').strip(),
             'use_strict_matching': bool(data.get('use_strict_matching', False)),
         }
         save_config(db, cfg)
+        if service:
+            try:
+                service.notify_config_updated()
+            except Exception as cfg_err:
+                print(f"Warning: failed to refresh configuration: {cfg_err}")
         # Auto-start scheduler if configured and service provided
         try:
             if service and _config_ready(db):
@@ -284,7 +299,8 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
         'songs': [],
         'artists': [],
         'albums': [],
-        'last_updated': None
+        'last_updated': None,
+        'version': None,
     }
 
     def refresh_catalog_cache():
@@ -295,7 +311,12 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
             return
 
         try:
-            # Get all tracked items
+            catalog_version = db.get_catalog_version() if db else None
+            if catalog_version and catalog_version == catalog_cache.get('version'):
+                print("Catalog cache is up to date; skipping refresh")
+                return
+
+            # Get all tracked items from persistent catalog
             songs = _get_tracked_songs(db)
             artists = _get_tracked_artists(db)
             albums = _get_tracked_albums(db)
@@ -312,7 +333,8 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
                 'songs': enhanced_songs,
                 'artists': enhanced_artists,
                 'albums': enhanced_albums,
-                'last_updated': time.time()
+                'last_updated': time.time(),
+                'version': catalog_version,
             })
             print(f"Cache updated with {len(enhanced_songs)} songs, {len(enhanced_artists)} artists, {len(enhanced_albums)} albums")
 
@@ -398,82 +420,64 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
             return jsonify({"error": str(e)}), 500
 
     def _get_tracked_songs(db_inst):
-        # Get songs from download queue and status
-        from .status import get_status
-        status = get_status()
-        songs = []
-
-        # Add from queue - extract from the actual item structure
-        queue_data = status.get('queue', {})
-        for section in ['pending', 'current', 'completed']:
-            for item in queue_data.get(section, []):
-                # Extract title, artist, album from the item directly
-                title = item.get('title', 'Unknown')
-                artist = item.get('artist', 'Unknown')
-                album = item.get('album', '')
-                duration = item.get('duration', 0)
-                download_status = item.get('status', 'unknown')
-
-                # Map download status to display status
-                if section == 'pending':
-                    display_status = 'queued'
-                elif section == 'current':
-                    display_status = 'downloading'
-                elif section == 'completed':
-                    if download_status == 'downloaded':
-                        display_status = 'downloaded'
-                    else:
-                        display_status = 'missing'  # failed downloads
-                else:
-                    display_status = download_status
-
-                songs.append({
-                    'id': f"song_{hash(f'{artist}|{title}') % 100000}",
-                    'name': title,
-                    'artist': artist,
-                    'album': album,
-                    'duration': duration,
-                    'status': display_status
-                })
-
-        # Deduplicate by name+artist
-        seen = set()
-        unique_songs = []
-        for song in songs:
-            key = f"{song['name']}|{song['artist']}"
-            if key not in seen:
-                seen.add(key)
-                unique_songs.append(song)
-
-        return unique_songs
+        if not db_inst:
+            return []
+        try:
+            return db_inst.fetch_catalog_tracks()
+        except Exception as exc:
+            print(f"Error fetching catalog tracks: {exc}")
+            return []
 
     def _get_tracked_artists(db_inst):
-        # Get unique artists from tracked songs
-        songs = _get_tracked_songs(db_inst)
-        artists = {}
-        for song in songs:
-            artist_name = song['artist']
-            if artist_name != 'Unknown' and artist_name not in artists:
-                artists[artist_name] = {
-                    'id': f"artist_{hash(artist_name) % 10000}",
-                    'name': artist_name
+        if not db_inst:
+            return []
+        try:
+            songs = db_inst.fetch_catalog_tracks()
+            counts: Dict[str, int] = {}
+            for song in songs:
+                artist_name = song.get('artist') or 'Unknown'
+                counts[artist_name] = counts.get(artist_name, 0) + 1
+
+            artists = db_inst.fetch_catalog_artists()
+            return [
+                {
+                    'id': artist['id'],
+                    'name': artist['name'],
+                    'song_count': counts.get(artist['name'], 0),
                 }
-        return list(artists.values())
+                for artist in artists
+            ]
+        except Exception as exc:
+            print(f"Error fetching catalog artists: {exc}")
+            return []
 
     def _get_tracked_albums(db_inst):
-        # Extract unique albums from tracked songs
-        songs = _get_tracked_songs(db_inst)
-        albums = {}
-        for song in songs:
-            album_name = song.get('album', '').strip()
-            artist_name = song.get('artist', 'Unknown')
-            if album_name and album_name != 'Unknown' and album_name not in albums:
-                albums[album_name] = {
-                    'id': f"album_{hash(f'{artist_name}|{album_name}') % 10000}",
-                    'name': album_name,
-                    'artist': artist_name
+        if not db_inst:
+            return []
+        try:
+            songs = db_inst.fetch_catalog_tracks()
+            counts: Dict[tuple, int] = {}
+            for song in songs:
+                album_name = (song.get('album') or '').strip()
+                artist_name = song.get('artist') or 'Unknown'
+                if not album_name:
+                    continue
+                key = (album_name, artist_name)
+                counts[key] = counts.get(key, 0) + 1
+
+            albums = db_inst.fetch_catalog_albums()
+            return [
+                {
+                    'id': album['id'],
+                    'name': album['name'],
+                    'artist': album.get('artist'),
+                    'track_count': counts.get((album['name'], album.get('artist')), 0),
                 }
-        return list(albums.values())
+                for album in albums
+            ]
+        except Exception as exc:
+            print(f"Error fetching catalog albums: {exc}")
+            return []
 
     def _fetch_ytm_metadata(yt_client, mode, item, db_inst=None):
         if mode == 'songs':

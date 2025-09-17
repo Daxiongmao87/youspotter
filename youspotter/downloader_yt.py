@@ -1,5 +1,5 @@
 import os
-from typing import Dict
+from typing import Dict, List, Optional, Tuple
 try:
     from yt_dlp import YoutubeDL as _YDL
 except Exception:  # pragma: no cover
@@ -17,7 +17,7 @@ def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
 
-def download_audio(candidate: Dict, track: Dict, cfg: Dict) -> bool:
+def download_audio(candidate: Dict, track: Dict, cfg: Dict) -> Tuple[bool, Optional[str]]:
     # cfg: {host_path, bitrate, format}
     host_path = cfg.get('host_path') or '.'
     fmt = cfg.get('format', 'mp3')
@@ -39,7 +39,7 @@ def download_audio(candidate: Dict, track: Dict, cfg: Dict) -> bool:
             add_recent(f"Download aborted: no URL for {track.get('artist','unknown')} - {track.get('title','')}", "ERROR")
         except Exception:
             pass
-        return False
+        return False, None
     
     # Simplified yt-dlp options similar to LidaTube
     ydl_opts = {
@@ -93,8 +93,15 @@ def download_audio(candidate: Dict, track: Dict, cfg: Dict) -> bool:
     
     # Progress hook
     progress_cb = cfg.get('progress_cb')
+    downloaded_files: List[str] = []
+
     def hook(d):
-        if progress_cb and d.get('status') == 'downloading':
+        status = d.get('status')
+        if status == 'finished':
+            filename = d.get('filename') or d.get('_filename')
+            if filename:
+                downloaded_files.append(filename)
+        if progress_cb and status == 'downloading':
             p = d.get('_percent_str') or ''
             try:
                 percent = int(float(p.strip().strip('%')))
@@ -109,6 +116,28 @@ def download_audio(candidate: Dict, track: Dict, cfg: Dict) -> bool:
     YDL = _get_YoutubeDL()
     try:
         with YDL(ydl_opts) as ydl:
+            probe_info = None
+            try:
+                probe_info = ydl.extract_info(url, download=False)
+            except Exception as probe_error:
+                from .status import add_recent
+                add_recent(
+                    f"Download probe failed ({type(probe_error).__name__}): {track.get('artist','unknown')} - {track.get('title','')}",
+                    "ERROR",
+                )
+                return False, None
+
+            formats = (probe_info or {}).get('formats') or []
+            available_kbps = [int(fmt.get('abr') or 0) for fmt in formats if fmt.get('abr')]
+            max_available = max(available_kbps) if available_kbps else 0
+            if min_kbps > max_available:
+                from .status import add_recent
+                add_recent(
+                    f"Download blocked: requires ≥{min_kbps}kbps but max available is {max_available}kbps for {track.get('artist','unknown')} - {track.get('title','')}",
+                    "ERROR",
+                )
+                return False, None
+
             ydl.download([url])
 
         # Clean up any leftover thumbnail files
@@ -131,7 +160,13 @@ def download_audio(candidate: Dict, track: Dict, cfg: Dict) -> bool:
             # Don't fail the download if cleanup fails
             pass
 
-        return True
+        final_path = None
+        if downloaded_files:
+            final_path = downloaded_files[-1]
+            if final_path and not os.path.isabs(final_path):
+                final_path = os.path.abspath(final_path)
+
+        return True, final_path
     except Exception as e:
         from .logging import get_logger, with_context
         with_context(get_logger(__name__), attempt=1)[0].error(f"yt-dlp download failed: {e}")
@@ -140,4 +175,4 @@ def download_audio(candidate: Dict, track: Dict, cfg: Dict) -> bool:
             add_recent(f"Download failed ({type(e).__name__}): {track.get('artist','unknown')} - {track.get('title','')} — {str(e)}", "ERROR")
         except Exception:
             pass
-        return False
+        return False, None

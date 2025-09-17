@@ -21,3 +21,6 @@ build/
 websource-*
 screenshot-*
 *transgression*
+
+# Reference materials and external repos
+reference/

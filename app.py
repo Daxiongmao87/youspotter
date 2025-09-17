@@ -93,6 +93,10 @@ def build_app():
     if cleaned_items > 0:
         print(f"Cleaned up {cleaned_items} stale download items from previous session")
 
+    # Refresh live queue now that persistence has been restored
+    service.bootstrap_live_queue_from_status()
+    service.reconcile_catalog(force=True)
+
     # Now create the app with the service
     app_with_service = create_app(service=service, db_path=db_path)
 

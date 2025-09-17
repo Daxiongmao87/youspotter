@@ -5,7 +5,7 @@ from youspotter.sync_service import SyncService
 
 class DummyService(SyncService):
     def __init__(self):
-        super().__init__(lambda: [], lambda t: [], lambda c, t: False)
+        super().__init__(lambda: [], lambda t: [], lambda c, t, cfg: (False, None), enable_watchdog=False)
         self.calls = 0
 
     def sync_now(self):
