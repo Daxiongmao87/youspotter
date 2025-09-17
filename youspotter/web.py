@@ -8,10 +8,9 @@ def init_web(app, db: DB, service):
     sc = SpotifyClient(db)
 
     def _get_redirect_uri():
-        # Use request context to generate the redirect URI
-        # This ensures the URI matches what the frontend displays to the user
-        # With ProxyFix middleware, this will correctly use HTTPS when behind a reverse proxy
-        return url_for('web.auth_callback', _external=True)
+        # Use request context to generate the redirect URI with HTTPS
+        # Spotify requires HTTPS redirect URIs for security
+        return url_for('web.auth_callback', _external=True, _scheme='https')
 
     @bp.route('/')
     def index():
