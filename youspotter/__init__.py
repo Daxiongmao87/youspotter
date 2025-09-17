@@ -299,8 +299,7 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
         'songs': [],
         'artists': [],
         'albums': [],
-        'last_updated': None,
-        'version': None,
+        'last_updated': 0,
     }
 
     def refresh_catalog_cache():
@@ -311,9 +310,11 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
             return
 
         try:
-            catalog_version = db.get_catalog_version() if db else None
-            if catalog_version and catalog_version == catalog_cache.get('version'):
-                print("Catalog cache is up to date; skipping refresh")
+            import time
+            # Check if cache is recent enough (5 minutes TTL)
+            cache_age = time.time() - catalog_cache.get('last_updated', 0)
+            if cache_age < 300:  # 5 minutes
+                print(f"Catalog cache is recent ({cache_age:.1f}s old); skipping refresh")
                 return
 
             # Get all tracked items from persistent catalog
@@ -328,13 +329,11 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
             enhanced_albums = albums  # Use all albums
 
             # Update cache atomically
-            import time
             catalog_cache.update({
                 'songs': enhanced_songs,
                 'artists': enhanced_artists,
                 'albums': enhanced_albums,
                 'last_updated': time.time(),
-                'version': catalog_version,
             })
             print(f"Cache updated with {len(enhanced_songs)} songs, {len(enhanced_artists)} artists, {len(enhanced_albums)} albums")
 
