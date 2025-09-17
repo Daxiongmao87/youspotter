@@ -7,6 +7,20 @@ def init_web(app, db: DB, service):
     bp = Blueprint('web', __name__)
     sc = SpotifyClient(db)
 
+    def _get_redirect_uri():
+        # Use configured host_path if available, otherwise fall back to request context
+        # This ensures consistency between auth URL generation and callback validation
+        host_path = db.get_setting('host_path')
+        if host_path:
+            # Ensure scheme is present
+            if not host_path.startswith(('http://', 'https://')):
+                scheme = request.headers.get('X-Forwarded-Proto', 'http')
+                host_path = f"{scheme}://{host_path}"
+            # Remove trailing slash if present, before appending path
+            host_path = host_path.rstrip('/')
+            return f"{host_path}{url_for('web.auth_callback')}"
+        return url_for('web.auth_callback', _external=True)
+
     @bp.route('/')
     def index():
         return render_template('index.html')
@@ -14,14 +28,14 @@ def init_web(app, db: DB, service):
     @bp.route('/auth/login')
     def auth_login():
         # Determine redirect_uri based on current request host
-        redirect_uri = url_for('web.auth_callback', _external=True)
+        redirect_uri = _get_redirect_uri()
         client_id = db.get_setting('spotify_client_id') or None
         return redirect(sc.get_auth_url(redirect_uri=redirect_uri, client_id=client_id))
 
     @bp.route('/auth/expected')
     def auth_expected():
         # Small diagnostic endpoint to confirm exact redirect_uri and client_id used
-        redirect_uri = url_for('web.auth_callback', _external=True)
+        redirect_uri = _get_redirect_uri()
         client_id = db.get_setting('spotify_client_id') or ''
         return jsonify({
             'redirect_uri': redirect_uri,
@@ -33,7 +47,7 @@ def init_web(app, db: DB, service):
         code = request.args.get('code')
         state = request.args.get('state') or ''
         if code:
-            redirect_uri = url_for('web.auth_callback', _external=True)
+            redirect_uri = _get_redirect_uri()
             client_id = db.get_setting('spotify_client_id') or None
             try:
                 sc.handle_callback(code, state, redirect_uri=redirect_uri, client_id=client_id)
