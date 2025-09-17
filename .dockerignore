@@ -1,0 +1,62 @@
+# Git
+.git
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# Development
+.claude/
+venv/
+.pytest_cache/
+coverage.xml
+.coverage*
+
+# Database (will be mounted as volume)
+*.db
+*.db-*
+
+# Python cache
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Node modules (if any)
+node_modules/
+
+# Reference materials
+reference/
+
+# Downloads directory (will be mounted as volume)
+downloads/
+
+# Test artifacts
+.coverage
+htmlcov/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Docker files (avoid recursive copying)
+Dockerfile
+docker-compose.yml
+.dockerignore
