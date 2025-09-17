@@ -202,6 +202,12 @@ class SpotifyClient:
                         raise re  # Re-raise for higher level handling
                     else:
                         raise
+            if r.status_code == 429:
+                # Rate limited - check Retry-After header
+                retry_after = int(r.headers.get('Retry-After', 60))
+                with_context(self.logger, attempt=1)[0].warning(f"Spotify rate limited, waiting {retry_after} seconds")
+                time.sleep(retry_after)
+                continue
             r.raise_for_status()
             data = r.json()
             for it in data.get("items", []):

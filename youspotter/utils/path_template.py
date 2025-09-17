@@ -26,7 +26,7 @@ def to_ytdlp_outtmpl(tmpl: str) -> str:
 
 
 def to_path_regex(tmpl: str) -> str:
-    """Convert a user template into a regex over a POSIX-style relative path.
+    r"""Convert a user template into a regex over a POSIX-style relative path.
 
     Example: "{artist}/{album}/{artist} - {title}.{ext}" ->
       r"^(?P<artist>.+?)/(?P<album>.+?)/(?P<artist>.+?)\s-\s(?P<title>.+?)\.(?P<ext>[^/]+)$"
