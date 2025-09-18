@@ -186,7 +186,7 @@ class SpotifyClient:
         if not at:
             raise RuntimeError("not_authenticated")
         headers = {"Authorization": f"Bearer {at}"}
-        url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks?additional_types=track&limit=100"
+        url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks?additional_types=track&limit=100&market=from_token"
         items: List[Dict] = []
         while url:
             try:
@@ -290,16 +290,16 @@ class SpotifyClient:
         if not at:
             raise RuntimeError("not_authenticated")
         headers = {"Authorization": f"Bearer {at}"}
-        url = f"https://api.spotify.com/v1/albums/{album_id}/tracks?limit=50"
+        url = f"https://api.spotify.com/v1/albums/{album_id}/tracks?limit=50&market=from_token"
         out: List[Dict] = []
         album_name = None
         # fetch album name
-        r0 = requests.get(f"https://api.spotify.com/v1/albums/{album_id}", headers=headers, timeout=15)
+        r0 = requests.get(f"https://api.spotify.com/v1/albums/{album_id}?market=from_token", headers=headers, timeout=15)
         if r0.status_code == 401:
             try:
                 at = self.refresh_access_token()
                 headers = {"Authorization": f"Bearer {at}"}
-                r0 = requests.get(f"https://api.spotify.com/v1/albums/{album_id}", headers=headers, timeout=15)
+                r0 = requests.get(f"https://api.spotify.com/v1/albums/{album_id}?market=from_token", headers=headers, timeout=15)
             except RuntimeError as re:
                 if str(re) in ("refresh_token_revoked", "not_authenticated"):
                     raise re  # Re-raise for higher level handling
@@ -340,7 +340,7 @@ class SpotifyClient:
         if not at:
             raise RuntimeError("not_authenticated")
         headers = {"Authorization": f"Bearer {at}"}
-        url = "https://api.spotify.com/v1/me/tracks?limit=50"
+        url = "https://api.spotify.com/v1/me/tracks?limit=50&market=from_token"
         items: List[Dict] = []
         while url:
             try:
