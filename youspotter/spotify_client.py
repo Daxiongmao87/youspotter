@@ -363,6 +363,25 @@ class SpotifyClient:
                 retry_after = int(r.headers.get('Retry-After', 60))
                 with_context(self.logger, attempt=1)[0].warning(f"Spotify liked tracks rate limited, retry in {retry_after} seconds")
                 raise RuntimeError(f"rate_limited:{retry_after}")
+            if r.status_code == 403:
+                # Handle 403 Forbidden - could be insufficient scope, private content, etc.
+                try:
+                    error_data = r.json()
+                    error_msg = error_data.get('error', {}).get('message', 'Access forbidden')
+                    reason = error_data.get('error', {}).get('reason', 'unknown')
+                except Exception:
+                    error_msg = 'Access forbidden'
+                    reason = 'unknown'
+
+                with_context(self.logger, attempt=1)[0].error(f"Spotify liked tracks forbidden: {error_msg} (reason: {reason})")
+
+                # Convert to RuntimeError with specific message for upstream handling
+                if 'insufficient' in error_msg.lower() or 'scope' in error_msg.lower():
+                    raise RuntimeError(f"insufficient_scope_for_liked_songs")
+                elif 'private' in error_msg.lower() or 'owner' in error_msg.lower():
+                    raise RuntimeError(f"liked_songs_access_denied")
+                else:
+                    raise RuntimeError(f"liked_songs_forbidden:{error_msg}")
             r.raise_for_status()
             data = r.json()
             for it in data.get("items", []):

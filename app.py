@@ -36,10 +36,15 @@ def build_app():
         for pid in ids:
             try:
                 if pid == "__LIKED_SONGS__":
-                    # Handle special Liked Songs playlist
-                    for t in sp.user_saved_tracks():
-                        t['playlist_id'] = pid
-                        tracks.append(t)
+                    # Handle special Liked Songs playlist - requires user-library-read scope
+                    try:
+                        for t in sp.user_saved_tracks():
+                            t['playlist_id'] = pid
+                            tracks.append(t)
+                    except Exception as liked_error:
+                        # If Liked Songs fails, just log and continue with other playlists
+                        print(f"Warning: Cannot access Liked Songs - {liked_error}. You may need to re-authenticate with updated permissions.")
+                        continue
                 else:
                     # Handle regular playlists
                     for t in sp.playlist_tracks(pid):
@@ -65,6 +70,10 @@ def build_app():
                     # Playlist access denied (private, deleted, etc.) - log and continue
                     playlist_id = error_str.split(":", 1)[1] if ":" in error_str else "unknown"
                     print(f"Warning: Access denied to playlist {playlist_id}. Playlist may be private or deleted.")
+                    continue
+                elif error_str in ("insufficient_scope_for_liked_songs", "liked_songs_access_denied") or error_str.startswith("liked_songs_forbidden:"):
+                    # Liked Songs access issues - log and continue (skip Liked Songs)
+                    print(f"Warning: Cannot access Liked Songs. {error_str}. You may need to re-authenticate.")
                     continue
                 else:
                     # Unknown error - re-raise to not hide real issues
