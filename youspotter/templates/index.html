@@ -299,6 +299,32 @@
           }
           el.textContent = msg;
         } catch (_) {}
+
+        // Check sync status and update button accordingly
+        checkSyncStatus();
+      }
+
+      async function checkSyncStatus() {
+        try {
+          const response = await fetch('/sync/status');
+          const status = await response.json();
+          const btn = document.getElementById('sync');
+
+          if (status.sync_running) {
+            btn.disabled = true;
+            btn.textContent = 'Syncing...';
+            // Poll until sync completes
+            setTimeout(checkSyncStatus, 1000);
+          } else {
+            btn.disabled = false;
+            btn.textContent = 'Sync Now';
+          }
+        } catch (e) {
+          // If can't check status, assume not running
+          const btn = document.getElementById('sync');
+          btn.disabled = false;
+          btn.textContent = 'Sync Now';
+        }
       }
 
       let currentQueuePage = 1;
@@ -498,8 +524,58 @@
         controls.appendChild(nextBtn);
       }
       async function syncNow() {
-        await fetch('/sync-now', {method: 'POST'});
-        setTimeout(loadStatus, 1000);
+        const btn = document.getElementById('sync');
+        const originalText = btn.textContent;
+
+        // Disable button and show "syncing..." state
+        btn.disabled = true;
+        btn.textContent = 'Syncing...';
+
+        try {
+          const response = await fetch('/sync-now', {method: 'POST'});
+          const result = await response.json();
+
+          if (!result.started) {
+            // Sync already running, show feedback
+            btn.textContent = 'Already Running';
+            setTimeout(() => {
+              btn.textContent = originalText;
+              btn.disabled = false;
+            }, 2000);
+            return;
+          }
+
+          // Sync started, monitor status until completion
+          const pollSyncStatus = async () => {
+            try {
+              const statusResp = await fetch('/sync/status');
+              const status = await statusResp.json();
+
+              if (!status.sync_running) {
+                // Sync completed
+                btn.textContent = originalText;
+                btn.disabled = false;
+                setTimeout(loadStatus, 500); // Refresh status after completion
+                return;
+              }
+
+              // Still running, check again in 1 second
+              setTimeout(pollSyncStatus, 1000);
+            } catch (e) {
+              // Error checking status, re-enable button
+              btn.textContent = originalText;
+              btn.disabled = false;
+            }
+          };
+
+          // Start polling
+          setTimeout(pollSyncStatus, 1000);
+
+        } catch (e) {
+          // Error starting sync, re-enable button
+          btn.textContent = originalText;
+          btn.disabled = false;
+        }
       }
       async function resetErrors() {
         const response = await fetch('/reset-errors', {method: 'POST'});

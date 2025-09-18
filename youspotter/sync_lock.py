@@ -20,3 +20,8 @@ def sync_lock():
             _busy = False
             _lock.release()
 
+def is_sync_running() -> bool:
+    """Check if a sync is currently running without acquiring the lock."""
+    global _busy
+    return _busy
+

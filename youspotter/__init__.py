@@ -118,7 +118,13 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
         if not service:
             return jsonify({"started": False, "reason": "service not configured"}), 200
         ok = service.sync_now()
-        return jsonify({"started": ok}), 200
+        reason = "started" if ok else "already running"
+        return jsonify({"started": ok, "reason": reason}), 200
+
+    @app.get('/sync/status')
+    def sync_status():
+        from youspotter.sync_lock import is_sync_running
+        return jsonify({"sync_running": is_sync_running()}), 200
 
     @app.post('/reset-errors')
     def reset_errors():

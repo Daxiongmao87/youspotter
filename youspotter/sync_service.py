@@ -33,6 +33,7 @@ class SyncService:
         self._enable_watchdog = enable_watchdog
         self._stop = threading.Event()
         self._paused = threading.Event()
+        self._timer_reset = threading.Event()  # Signal for scheduler timer reset
         self._thread: Optional[threading.Thread] = None
         self._download_thread: Optional[threading.Thread] = None
         self._current_download_future = None  # Track current download for cancellation
@@ -583,6 +584,16 @@ class SyncService:
                     wait_seconds = (completed_at + int(interval_seconds)) - now
                     if wait_seconds <= 0:
                         break
+                    # Check for manual sync timer reset
+                    if self._timer_reset.is_set():
+                        self._timer_reset.clear()
+                        # Reset timer: restart interval from now
+                        completed_at = now
+                        try:
+                            self.next_run_at = int(completed_at + int(interval_seconds))
+                        except Exception:
+                            self.next_run_at = None
+                        continue
                     # Wait in small increments so stop signal is responsive
                     sleep_for = min(wait_seconds, 1.0)
                     self._stop.wait(sleep_for)
@@ -612,7 +623,11 @@ class SyncService:
         self._stop_filesystem_monitor()
 
     def sync_now(self) -> bool:
-        return self.run_once(reason="manual")
+        result = self.run_once(reason="manual")
+        if result:
+            # Reset scheduler timer after successful manual sync
+            self._timer_reset.set()
+        return result
 
     def notify_config_updated(self):
         self._ensure_watchdog()
