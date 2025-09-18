@@ -4,18 +4,17 @@ import os
 import secrets
 import threading
 import time
+from typing import Dict, List, Optional
 from urllib.parse import urlencode
-from typing import List, Dict, Optional
 
 import requests
+
 from .logging import get_logger, with_context
-
 from .storage import DB, TokenStore
-
 
 AUTH_URL = "https://accounts.spotify.com/authorize"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
-SCOPE = "playlist-read-private playlist-read-collaborative"
+SCOPE = "playlist-read-private playlist-read-collaborative user-library-read"
 
 
 class SpotifyClient:
@@ -212,6 +211,25 @@ class SpotifyClient:
                 with_context(self.logger, attempt=1)[0].warning(f"Spotify rate limited, waiting {retry_after} seconds")
                 time.sleep(retry_after)
                 continue
+            if r.status_code == 403:
+                # Handle 403 Forbidden - could be insufficient scope, private playlist, etc.
+                try:
+                    error_data = r.json()
+                    error_msg = error_data.get('error', {}).get('message', 'Access forbidden')
+                    reason = error_data.get('error', {}).get('reason', 'unknown')
+                except Exception:
+                    error_msg = 'Access forbidden'
+                    reason = 'unknown'
+
+                with_context(self.logger, attempt=1)[0].error(f"Spotify playlist {playlist_id} forbidden: {error_msg} (reason: {reason})")
+
+                # Convert to RuntimeError with specific message for upstream handling
+                if 'insufficient' in error_msg.lower() or 'scope' in error_msg.lower():
+                    raise RuntimeError(f"insufficient_scope_for_playlist:{playlist_id}")
+                elif 'private' in error_msg.lower() or 'owner' in error_msg.lower():
+                    raise RuntimeError(f"playlist_access_denied:{playlist_id}")
+                else:
+                    raise RuntimeError(f"playlist_forbidden:{playlist_id}:{error_msg}")
             r.raise_for_status()
             data = r.json()
             for it in data.get("items", []):
@@ -316,3 +334,56 @@ class SpotifyClient:
                 })
             url = data.get('next')
         return out
+
+    def user_saved_tracks(self) -> List[Dict]:
+        at, _ = self.token_store.load()
+        if not at:
+            raise RuntimeError("not_authenticated")
+        headers = {"Authorization": f"Bearer {at}"}
+        url = "https://api.spotify.com/v1/me/tracks?limit=50"
+        items: List[Dict] = []
+        while url:
+            try:
+                r = requests.get(url, headers=headers, timeout=15)
+            except Exception as e:
+                with_context(self.logger, attempt=1)[0].error(f"spotify liked tracks request error: {e}")
+                raise
+            if r.status_code == 401:
+                try:
+                    at = self.refresh_access_token()
+                    headers = {"Authorization": f"Bearer {at}"}
+                    r = requests.get(url, headers=headers, timeout=15)
+                except RuntimeError as re:
+                    error_str = str(re)
+                    if error_str in ("refresh_token_revoked", "not_authenticated") or error_str.startswith("spotify_refresh_failed_http_"):
+                        raise re  # Re-raise for higher level handling
+                    else:
+                        raise
+            if r.status_code == 429:
+                retry_after = int(r.headers.get('Retry-After', 60))
+                with_context(self.logger, attempt=1)[0].warning(f"Spotify liked tracks rate limited, retry in {retry_after} seconds")
+                raise RuntimeError(f"rate_limited:{retry_after}")
+            r.raise_for_status()
+            data = r.json()
+            for it in data.get("items", []):
+                tr = (it or {}).get("track") or {}
+                if not tr or tr.get("is_local"):
+                    continue
+                artist_obj = (tr.get("artists") or [{}])[0]
+                artist = artist_obj.get("name", "")
+                artist_id = artist_obj.get("id", "")
+                album_obj = (tr.get("album") or {})
+                album = album_obj.get("name", "")
+                album_id = album_obj.get("id", "")
+                title = tr.get("name", "")
+                duration_ms = tr.get("duration_ms", 0)
+                items.append({
+                    "artist": artist,
+                    "artist_id": artist_id,
+                    "album": album,
+                    "album_id": album_id,
+                    "title": title,
+                    "duration": int((duration_ms or 0) // 1000)
+                })
+            url = data.get("next")
+        return items

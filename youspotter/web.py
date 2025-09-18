@@ -1,9 +1,11 @@
 import json
 import time
 
-from flask import Blueprint, render_template, redirect, request, jsonify, url_for
-from .storage import DB
+from flask import (Blueprint, jsonify, redirect, render_template, request,
+                   url_for)
+
 from .spotify_client import SpotifyClient
+from .storage import DB
 
 
 def init_web(app, db: DB, service):
@@ -98,33 +100,57 @@ def init_web(app, db: DB, service):
         cache = load_cache()
         cached_data = cache.get('data') if cache else []
         cache_valid = bool(cache and cache.get('expires_at', 0) > now)
+
+        # Helper function to add Liked Songs to any playlist list
+        def add_liked_songs_to_playlists(pls):
+            try:
+                liked_tracks = sc.user_saved_tracks()
+                liked_count = len(liked_tracks)
+            except Exception:
+                liked_count = 0
+
+            liked_songs_entry = {
+                "id": "__LIKED_SONGS__",
+                "name": "❤️ Liked Songs",
+                "tracks": liked_count
+            }
+            return [liked_songs_entry] + pls
+
         if cache_valid:
-            return jsonify(apply_selection(cached_data)), 200
+            # Add Liked Songs to cached data
+            enriched_cached_data = add_liked_songs_to_playlists(cached_data)
+            return jsonify(apply_selection(enriched_cached_data)), 200
 
         rate_limited_until = int(db.get_kv('playlist_rate_limited_until') or 0)
         if rate_limited_until > now:
             remaining = rate_limited_until - now
             if cached_data:
-                return jsonify(apply_selection(cached_data)), 200
+                enriched_cached_data = add_liked_songs_to_playlists(cached_data)
+                return jsonify(apply_selection(enriched_cached_data)), 200
             return jsonify({"error": "Spotify rate limited", "retry_after": remaining}), 429
 
         try:
             pls = sc.current_user_playlists()
+            # Add Liked Songs to fresh playlist data
+            pls = add_liked_songs_to_playlists(pls)
         except RuntimeError as e:
             msg = str(e) or 'error'
             if msg.startswith('rate_limited:'):
                 retry_after = int(msg.split(':', 1)[1] or 60)
                 db.set_kv('playlist_rate_limited_until', str(now + retry_after))
                 if cached_data:
-                    return jsonify(apply_selection(cached_data)), 200
+                    enriched_cached_data = add_liked_songs_to_playlists(cached_data)
+                    return jsonify(apply_selection(enriched_cached_data)), 200
                 return jsonify({"error": "Spotify rate limited", "retry_after": retry_after}), 429
             if cached_data:
-                return jsonify(apply_selection(cached_data)), 200
+                enriched_cached_data = add_liked_songs_to_playlists(cached_data)
+                return jsonify(apply_selection(enriched_cached_data)), 200
             return jsonify({"error": msg}), 401
         except Exception as e:
             msg = str(e) or 'error'
             if cached_data:
-                return jsonify(apply_selection(cached_data)), 200
+                enriched_cached_data = add_liked_songs_to_playlists(cached_data)
+                return jsonify(apply_selection(enriched_cached_data)), 200
             return jsonify({"error": msg}), 401
 
         save_cache(pls)
@@ -163,6 +189,7 @@ def init_web(app, db: DB, service):
         # Auto-start scheduler if configured
         try:
             from .sync_service import SyncService  # type: ignore
+
             # service passed via closure
             if _config_ready(db) and service:
                 service.start_scheduler(interval_seconds=900)

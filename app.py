@@ -1,12 +1,13 @@
+import json
 import os
 from pathlib import Path
+
 from youspotter import create_app
-from youspotter.storage import DB
-from youspotter.spotify_client import SpotifyClient
-from youspotter.youtube_client import YouTubeMusicClient
 from youspotter.downloader_yt import download_audio
+from youspotter.spotify_client import SpotifyClient
+from youspotter.storage import DB
 from youspotter.sync_service import SyncService
-import json
+from youspotter.youtube_client import YouTubeMusicClient
 
 
 def _config_ready(db: DB) -> bool:
@@ -32,24 +33,42 @@ def build_app():
                 strategies[pid] = {'song': True, 'artist': False, 'album': False}
         ids = list(strategies.keys())
         tracks = []
-        try:
-            for pid in ids:
-                for t in sp.playlist_tracks(pid):
-                    t['playlist_id'] = pid
-                    tracks.append(t)
-        except RuntimeError as e:
-            error_str = str(e)
-            if error_str == "refresh_token_revoked":
-                # Token was revoked, user needs to re-authenticate
-                return []
-            elif error_str == "not_authenticated":
-                # No tokens available, user needs to authenticate
-                return []
-            elif error_str.startswith("spotify_refresh_failed_http_"):
-                # HTTP error during token refresh, treat as authentication failure
-                return []
-            else:
-                raise
+        for pid in ids:
+            try:
+                if pid == "__LIKED_SONGS__":
+                    # Handle special Liked Songs playlist
+                    for t in sp.user_saved_tracks():
+                        t['playlist_id'] = pid
+                        tracks.append(t)
+                else:
+                    # Handle regular playlists
+                    for t in sp.playlist_tracks(pid):
+                        t['playlist_id'] = pid
+                        tracks.append(t)
+            except RuntimeError as e:
+                error_str = str(e)
+                if error_str == "refresh_token_revoked":
+                    # Token was revoked, user needs to re-authenticate - affects all playlists
+                    return []
+                elif error_str == "not_authenticated":
+                    # No tokens available, user needs to authenticate - affects all playlists
+                    return []
+                elif error_str.startswith("spotify_refresh_failed_http_"):
+                    # HTTP error during token refresh - affects all playlists
+                    return []
+                elif error_str.startswith("insufficient_scope_for_playlist:"):
+                    # Missing OAuth scope for specific playlist - log and continue with other playlists
+                    playlist_id = error_str.split(":", 1)[1] if ":" in error_str else "unknown"
+                    print(f"Warning: Insufficient OAuth scope for playlist {playlist_id}. You may need to re-authenticate.")
+                    continue
+                elif error_str.startswith("playlist_access_denied:") or error_str.startswith("playlist_forbidden:"):
+                    # Playlist access denied (private, deleted, etc.) - log and continue
+                    playlist_id = error_str.split(":", 1)[1] if ":" in error_str else "unknown"
+                    print(f"Warning: Access denied to playlist {playlist_id}. Playlist may be private or deleted.")
+                    continue
+                else:
+                    # Unknown error - re-raise to not hide real issues
+                    raise
         return tracks
 
     def fetch_strategies():
