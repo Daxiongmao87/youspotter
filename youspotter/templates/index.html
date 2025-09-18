@@ -254,7 +254,7 @@
         // Enable auth if configured and auto-load playlists when ready
         try {
           const st = await (await fetch('/app/state')).json();
-          document.getElementById('auth_btn').disabled = !(st.configured && !st.authenticated);
+          document.getElementById('auth_btn').disabled = !st.configured;
           if (st.configured && st.authenticated) {
             await gateViews();
             await loadPlaylists();
