@@ -261,9 +261,19 @@
           }
         } catch(e){}
       }
-      async function loadStatus() {
-        const r = await fetch('/status');
-        const s = await r.json();
+      async function loadStatus(statusData = null, syncStatus = null) {
+        let s = statusData;
+        if (!s) {
+          const r = await fetch('/status');
+          if (!r.ok) throw new Error('Failed to load status');
+          s = await r.json();
+        }
+        let sync = syncStatus;
+        if (!sync) {
+          const response = await fetch('/sync/status');
+          if (!response.ok) throw new Error('Failed to load sync status');
+          sync = await response.json();
+        }
         document.getElementById('missing').textContent = s.missing;
         document.getElementById('downloading').textContent = s.downloading;
         document.getElementById('downloaded').textContent = s.downloaded;
@@ -299,58 +309,137 @@
           }
           el.textContent = msg;
         } catch (_) {}
-
-        // Check sync status and update button accordingly
-        checkSyncStatus();
+        updateSyncButton(sync);
+        statusSnapshot = s;
+        lastSyncStatus = sync;
       }
 
-      async function checkSyncStatus() {
-        try {
-          const response = await fetch('/sync/status');
-          const status = await response.json();
-          const btn = document.getElementById('sync');
+      function humanizePhase(phase) {
+        if (!phase || phase === 'idle') return '';
+        return phase.replace(/[-_]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      }
 
-          if (status.sync_running) {
-            btn.disabled = true;
-            btn.textContent = 'Syncing...';
-            // Poll until sync completes
-            setTimeout(checkSyncStatus, 1000);
-          } else {
-            btn.disabled = false;
-            btn.textContent = 'Sync Now';
+      function updateSyncButton(syncStatus) {
+        const btn = document.getElementById('sync');
+        if (!btn) return;
+        const canSync = btn.dataset.cansync !== 'false';
+        if (syncStatus && syncStatus.sync_running) {
+          btn.disabled = true;
+          const phase = humanizePhase(syncStatus.phase || 'working');
+          const processed = Number.isFinite(syncStatus.processed) ? Number(syncStatus.processed) : null;
+          const total = Number.isFinite(syncStatus.total) ? Number(syncStatus.total) : null;
+          let label = 'Syncing…';
+          if (phase) {
+            if (total && total > 0 && processed !== null) {
+              label += ` (${phase} ${processed}/${total})`;
+            } else {
+              label += ` (${phase})`;
+            }
           }
-        } catch (e) {
-          // If can't check status, assume not running
-          const btn = document.getElementById('sync');
-          btn.disabled = false;
+          btn.textContent = label;
+          btn.title = phase ? `Sync in progress — phase: ${phase}` : 'Sync in progress';
+        } else {
+          btn.disabled = !canSync;
           btn.textContent = 'Sync Now';
+          btn.title = '';
         }
       }
 
       let currentQueuePage = 1;
       let currentResultsPage = 1;
-      async function loadQueue(queuePage = 1, resultsPage = 1) {
+      let statusSnapshot = null;
+      let lastSyncStatus = null;
+      let lastQueueSnapshot = null;
+      let statusRefreshTimer = null;
+      let statusRefreshInFlight = false;
+      const NORMAL_STATUS_INTERVAL = 3000;
+      const ERROR_STATUS_INTERVAL = 5000;
+
+      function scheduleStatusRefresh(delay = NORMAL_STATUS_INTERVAL) {
+        if (statusRefreshTimer) {
+          clearTimeout(statusRefreshTimer);
+          statusRefreshTimer = null;
+        }
+        statusRefreshTimer = setTimeout(unifiedStatusRefresh, delay);
+      }
+
+      function triggerStatusRefresh(immediate = false) {
+        const delay = immediate ? 0 : 200;
+        scheduleStatusRefresh(delay);
+      }
+      async function loadQueue(queuePage = 1, resultsPage = 1, snapshot = null) {
         currentQueuePage = queuePage;
         currentResultsPage = resultsPage;
 
-        // Load queue data
-        const queueResponse = await fetch(`/queue?page=${queuePage}&page_size=50`);
-        const queueData = await queueResponse.json();
+        // Load queue data when not provided by unified refresh
+        let queueSnapshot = snapshot;
+        if (!queueSnapshot) {
+          const queueResponse = await fetch(`/queue?page=${queuePage}&page_size=50`);
+          if (!queueResponse.ok) {
+            throw new Error('Failed to load queue');
+          }
+          queueSnapshot = await queueResponse.json();
+        }
+
+        lastQueueSnapshot = queueSnapshot;
+        queueData = queueSnapshot;
 
         // Update active download display
-        updateActiveDownload(queueData);
+        updateActiveDownload(queueSnapshot);
 
         // Update queue table (pending items only)
-        updateQueueTable(queueData);
+        updateQueueTable(queueSnapshot);
 
         // Update results table (completed items only)
-        updateResultsTable(queueData);
+        updateResultsTable(queueSnapshot);
 
         // Update queue info
         const queueInfo = document.getElementById('queue_info');
-        const totalPending = queueData.pending_total || 0;
-        const totalCurrent = queueData.current_total || 0;
+        const totalPending = queueSnapshot.pending_total || 0;
+        const totalCurrent = queueSnapshot.current_total || 0;
         queueInfo.textContent = `${totalPending} pending, ${totalCurrent} downloading`;
+        return queueSnapshot;
+      }
+
+      async function unifiedStatusRefresh() {
+        if (statusRefreshInFlight) {
+          scheduleStatusRefresh(NORMAL_STATUS_INTERVAL);
+          return;
+        }
+        statusRefreshInFlight = true;
+        let nextDelay = NORMAL_STATUS_INTERVAL;
+        try {
+          const queueUrl = `/queue?page=${currentQueuePage}&page_size=50`;
+          const [statusResp, syncResp, queueResp] = await Promise.all([
+            fetch('/status'),
+            fetch('/sync/status'),
+            fetch(queueUrl),
+          ]);
+
+          if (!statusResp.ok || !syncResp.ok || !queueResp.ok) {
+            throw new Error('Failed to refresh status');
+          }
+
+          const [statusData, syncData, queueData] = await Promise.all([
+            statusResp.json(),
+            syncResp.json(),
+            queueResp.json(),
+          ]);
+
+          await loadStatus(statusData, syncData);
+          await loadQueue(currentQueuePage, currentResultsPage, queueData);
+        } catch (error) {
+          console.warn('Status refresh failed', error);
+          const btn = document.getElementById('sync');
+          if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Sync Now';
+          }
+          nextDelay = ERROR_STATUS_INTERVAL;
+        } finally {
+          statusRefreshInFlight = false;
+          scheduleStatusRefresh(nextDelay);
+        }
       }
 
       function updateActiveDownload(data) {
@@ -529,7 +618,8 @@
 
         // Disable button and show "syncing..." state
         btn.disabled = true;
-        btn.textContent = 'Syncing...';
+        btn.textContent = 'Syncing…';
+        btn.title = 'Sync requested';
 
         try {
           const response = await fetch('/sync-now', {method: 'POST'});
@@ -541,49 +631,30 @@
             setTimeout(() => {
               btn.textContent = originalText;
               btn.disabled = false;
+              btn.title = '';
             }, 2000);
             return;
           }
 
-          // Sync started, monitor status until completion
-          const pollSyncStatus = async () => {
-            try {
-              const statusResp = await fetch('/sync/status');
-              const status = await statusResp.json();
-
-              if (!status.sync_running) {
-                // Sync completed
-                btn.textContent = originalText;
-                btn.disabled = false;
-                setTimeout(loadStatus, 500); // Refresh status after completion
-                return;
-              }
-
-              // Still running, check again in 1 second
-              setTimeout(pollSyncStatus, 1000);
-            } catch (e) {
-              // Error checking status, re-enable button
-              btn.textContent = originalText;
-              btn.disabled = false;
-            }
-          };
-
-          // Start polling
-          setTimeout(pollSyncStatus, 1000);
+          // Sync started, immediate status refresh
+          updateSyncButton({sync_running: true, phase: 'initialize', processed: 0, total: 0});
+          triggerStatusRefresh(true);
 
         } catch (e) {
           // Error starting sync, re-enable button
           btn.textContent = originalText;
           btn.disabled = false;
+          btn.title = '';
         }
       }
+
       async function resetErrors() {
         const response = await fetch('/reset-errors', {method: 'POST'});
         const result = await response.json();
         if (result.reset) {
           showToast(`✅ Reset errors: ${result.requeued_failed || 0} items requeued`);
         }
-        loadQueue(currentQueuePage);
+        triggerStatusRefresh(true);
       }
 
       // Download control functions
@@ -846,8 +917,19 @@
         try {
           const canSync = !!(st.configured && st.authenticated);
           const btnSync = document.getElementById('sync');
-          if (btnSync) btnSync.disabled = !canSync;
+          if (btnSync) {
+            btnSync.dataset.cansync = canSync ? 'true' : 'false';
+            if (!canSync) {
+              btnSync.disabled = true;
+              btnSync.textContent = 'Sync Now';
+              btnSync.title = 'Configure and authenticate Spotify to enable sync';
+            } else if (!(lastSyncStatus && lastSyncStatus.sync_running)) {
+              btnSync.disabled = false;
+              btnSync.title = '';
+            }
+          }
         } catch(_) {}
+        updateSyncButton(lastSyncStatus);
       }
       function showSaved(){
         const msg = document.createElement('div');
@@ -874,12 +956,9 @@
         await gateViews();
         if(!document.getElementById('gated').classList.contains('hidden')){
           await loadPlaylists();
-          await loadStatus();
-          await loadQueue();
           await loadCatalog(); // Load catalog on initial load
-          setInterval(loadStatus, 3000);
-          setInterval(() => loadQueue(currentQueuePage, currentResultsPage), 3000);
         }
+        triggerStatusRefresh(true);
       }
 
       // Catalog mode switching

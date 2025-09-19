@@ -65,3 +65,15 @@ def test_config_validation(tmp_path: Path):
     assert r.status_code == 400
     r = client.post('/config', json={'bitrate': 128, 'format': 'mp3', 'concurrency': 99})
     assert r.status_code == 400
+
+
+def test_sync_status_includes_progress(tmp_path: Path):
+    svc = DummyService()
+    svc._set_progress('dedupe', 5, 10)
+    app = create_app(service=svc, db_path=str(tmp_path / 'progress.db'))
+    client = app.test_client()
+    data = client.get('/sync/status').get_json()
+    assert data['phase'] == 'dedupe'
+    assert data['processed'] == 5
+    assert data['total'] == 10
+    assert 'heartbeat_epoch' in data

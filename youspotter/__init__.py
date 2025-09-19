@@ -124,7 +124,18 @@ def create_app(service: Optional[SyncService] = None, db_path: Optional[str] = N
     @app.get('/sync/status')
     def sync_status():
         from youspotter.sync_lock import is_sync_running
-        return jsonify({"sync_running": is_sync_running()}), 200
+        payload = {"sync_running": is_sync_running()}
+        if service:
+            try:
+                payload.update(service.get_sync_progress())
+            except Exception:
+                pass
+        else:
+            payload.setdefault('phase', 'idle')
+            payload.setdefault('processed', 0)
+            payload.setdefault('total', 0)
+            payload.setdefault('heartbeat_epoch', 0)
+        return jsonify(payload), 200
 
     @app.post('/reset-errors')
     def reset_errors():

@@ -120,3 +120,13 @@ def test_reconciliation_detects_missing_files(tmp_path):
     assert again is not None
     assert len(again['pending']) == 1
     assert again['counts']['missing'] == 1
+
+
+def test_get_sync_progress_reflects_updates(tmp_path):
+    svc = make_service(tmp_path, success=True)
+    svc._set_progress('fetch-playlists', 10, 25)
+    snapshot = svc.get_sync_progress()
+    assert snapshot['phase'] == 'fetch-playlists'
+    assert snapshot['processed'] == 10
+    assert snapshot['total'] == 25
+    assert snapshot['heartbeat_epoch'] >= 0

@@ -62,10 +62,25 @@ class SyncService:
         self._last_reconcile = 0.0
         self._reconcile_interval = 10.0
 
+        # Track sync progress for UI/telemetry
+        self._progress_lock = threading.Lock()
+        self._progress = {
+            "phase": "idle",
+            "processed": 0,
+            "total": 0,
+            "heartbeat": 0.0,
+        }
+        self._last_progress_log = 0.0
+        self._last_progress_phase = "idle"
+        self._last_progress_processed = 0
+        self._progress['heartbeat'] = time.time()
+
     def sync_spotify_tracks(self) -> bool:
         """Sync Spotify track data and update pending queue"""
+        self._set_progress("initialize", 0, 0)
         raw_tracks = self.fetch_spotify_tracks() or []
         tracks = list(raw_tracks)
+        self._set_progress("fetch-playlists", len(raw_tracks), len(raw_tracks))
         # Expand per playlist strategies if provided
         try:
             strategies = self.fetch_playlist_strategies() or {}
@@ -110,10 +125,15 @@ class SyncService:
         except Exception:
             pass
 
+        total_candidates = len(tracks)
+        self._set_progress("expand", total_candidates, total_candidates)
+
         # Deduplicate tracks using identity key to avoid duplicate queue entries
         deduped_tracks: List[Dict] = []
         seen_identities = set()
-        for track in tracks:
+        if total_candidates:
+            self._set_progress("dedupe", 0, total_candidates)
+        for idx, track in enumerate(tracks):
             try:
                 ident = identity_key(track)
             except Exception:
@@ -124,8 +144,11 @@ class SyncService:
                 continue
             seen_identities.add(ident)
             deduped_tracks.append(dict(track))
+            if total_candidates and ((idx + 1) % 50 == 0 or (idx + 1) == total_candidates):
+                self._set_progress("dedupe", idx + 1, total_candidates)
 
         tracks = deduped_tracks
+        self._set_progress("dedupe", len(tracks), len(tracks))
 
         # Compute totals for tracking using deduplicated list
         songs = artists = albums = 0
@@ -141,6 +164,8 @@ class SyncService:
         from youspotter.status import add_recent
 
         catalog_items: List[Dict] = []
+        if tracks:
+            self._set_progress("persist", 0, len(tracks))
         for track in tracks:
             artist = track.get('artist', '').strip() or 'Unknown'
             title = track.get('title', '').strip() or 'Unknown'
@@ -161,15 +186,21 @@ class SyncService:
         if self.db:
             try:
                 self.db.upsert_tracks(catalog_items)
+                if catalog_items:
+                    self._set_progress("persist", len(catalog_items), len(catalog_items))
             except Exception as db_err:
                 print(f"Warning: failed to upsert catalog: {db_err}")
 
+        total_for_reconcile = max(len(tracks), 1)
+        self._set_progress("reconcile", 0, total_for_reconcile)
         reconciliation = self.reconcile_catalog(force=True)
         if reconciliation:
             pending_count = len(reconciliation.get('pending', []))
         else:
             live = self.get_live_queue_status()
             pending_count = len(live.get('pending', []))
+        display_total = max(total_for_reconcile, pending_count or 0, 1)
+        self._set_progress("reconcile", pending_count, display_total)
 
         add_recent(
             f"Synced {len(tracks)} tracks from Spotify ({songs} songs, {artists} artists, {albums} albums) — pending: {pending_count}",
@@ -335,6 +366,60 @@ class SyncService:
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _set_progress(self, phase: str, processed: int | None = None, total: int | None = None):
+        """Update progress snapshot and emit throttled logging."""
+        now = time.time()
+        with self._progress_lock:
+            snapshot = dict(self._progress)
+            snapshot['phase'] = phase
+            snapshot['heartbeat'] = now
+            if processed is not None:
+                snapshot['processed'] = max(0, int(processed))
+            if total is not None:
+                snapshot['total'] = max(0, int(total))
+            self._progress.update(snapshot)
+
+            current_phase = self._progress['phase']
+            current_processed = self._progress.get('processed', 0)
+            current_total = self._progress.get('total', 0)
+
+            should_log = False
+            phase_changed = current_phase != self._last_progress_phase
+            processed_changed = current_processed != self._last_progress_processed
+            if phase_changed:
+                should_log = True
+            elif now - self._last_progress_log >= 15:
+                should_log = True
+            elif processed_changed and now - self._last_progress_log >= 10:
+                should_log = True
+
+            if should_log:
+                self._last_progress_phase = current_phase
+                self._last_progress_processed = current_processed
+                self._last_progress_log = now
+
+        if should_log:
+            friendly_phase = current_phase.replace('-', ' ').replace('_', ' ')
+            message = (
+                f"Sync progress — phase={friendly_phase} processed={current_processed}/{current_total}"
+            )
+            print(message)
+            try:
+                add_recent(message, "INFO")
+            except Exception:
+                pass
+
+    def get_sync_progress(self) -> dict:
+        with self._progress_lock:
+            snapshot = dict(self._progress)
+        heartbeat_epoch = int(snapshot.get('heartbeat', 0))
+        return {
+            "phase": snapshot.get('phase', 'idle'),
+            "processed": int(snapshot.get('processed', 0) or 0),
+            "total": int(snapshot.get('total', 0) or 0),
+            "heartbeat_epoch": heartbeat_epoch,
+        }
+
     def run_once(self, reason: str = "manual") -> bool:
         """Run a single sync cycle, logging the trigger reason."""
         with sync_lock() as acquired:
@@ -345,7 +430,10 @@ class SyncService:
                 add_recent(f"Sync starting ({reason})", "INFO")
             except Exception:
                 pass
-            return self.sync_spotify_tracks()
+            try:
+                return self.sync_spotify_tracks()
+            finally:
+                self._set_progress("idle", 0, 0)
 
     def _download_worker_loop(self):
         """Continuously process download queue"""
